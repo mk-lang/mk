@@ -28,7 +28,7 @@ Note that `SAFE-PUNC` excludes double-quotes, pipes, and commas.
 Reserve definitions are fairly straightforward:
 
   reserve = "reserve" compiler-var "(" NUMBER ")"
-              +( +LWS compiler-var "(" NUMBER ")" ) EOL
+              +("," +LWS compiler-var "(" NUMBER ")" ) EOL
 
 As are builtins:
 
