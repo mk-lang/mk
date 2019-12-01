@@ -3,11 +3,21 @@ This file contains the various bits of sytnax, written in ABNF.
 ------------------------------------------------------------------
 
 Assuming ALPHA, DIGIT, ASCII (where ASCII is any ascii character
-from decimal value 32 to 126, inclusive). We also are using EOL to
-denote the end of a line in the source file.
+from decimal value 32 to 126, inclusive, in addition to
+whitespace). We also are using EOL to denote the end of a line in
+the source file.
 
   ESCAPE-VAL = "|" | "," | "'" | <"> | "n"
              | "t" | "f" | "v" | "\"
+             | HEX | UTF-8-SMALL | UTF-8-BIG
+
+  HEX-CHAR = DIGIT | "A" | "B" | "C" | "D" | "E" | "F"
+                   | "a" | "b" | "c" | "d" | "e" | "f"
+
+  HEX         = "x" HEX-CHAR HEX-CHAR
+  UTF-8-SMALL = "u" HEX-CHAR HEX-CHAR HEX-CHAR HEX-CHAR
+  UTF-8-BIG   = "U" HEX-CHAR HEX-CHAR HEX-CHAR HEX-CHAR
+                    HEX-CHAR HEX-CHAR HEX-CHAR HEX-CHAR
   
   ESCAPED = "\" ESCAPE-VAL
   
@@ -18,7 +28,7 @@ denote the end of a line in the source file.
 
   SAFE-CHAR = ALPHA | DIGIT | ESCAPED | SAFE-PUNC
 
-  LWS  = <a single linear whitespace character>
+  LWS = <a single linear whitespace character>
 
   compiler-var = +Alpha
 
@@ -56,9 +66,9 @@ Pattern definitions are where it starts to get more complex.
                        +( +LWS ( pat-elem-succ | pat-elem ) ) *LWS ")"
 
   pat-elem-rep0   = "*" *LWS pat-elem-rep-tail
-  pat-elem-rep1   = "*" *LWS pat-elem-rep-tail
+  pat-elem-rep1   = "+" *LWS pat-elem-rep-tail
   pat-elem-group  = "(" *LWS pat-elem +( +LWS pat-elem ) ")"
-  pat-elem-either = "(" *LWS pat-elem +( *LWS "|" *LWS pat-elem ) ")"
+  pat-elem-either = pat-elem +( *LWS "|" *LWS pat-elem )
 
   pat-elem = compiler-var
            | char-ranges
@@ -66,9 +76,10 @@ Pattern definitions are where it starts to get more complex.
            | pat-elem-rep0
            | pat-elem-rep1
            | pat-elem-group
-           | pat-elem-either
+           | "(" *LWS pat-elem-either ")"
 
-  pattern-def = "pattern" +LWS compiler-var *LWS ":" *LWS +( pat-elem ) EOL
+  pattern-def = "pattern" +LWS compiler-var *LWS ":" *LWS
+                  ( pat-elem-either | +( pat-elem ) ) EOL
 
 Note that these definitions are fairly restrictive in where
 whitespace is allowed. This is intentional.
