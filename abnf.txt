@@ -1,0 +1,110 @@
+This file contains the various bits of sytnax, written in ABNF.
+
+------------------------------------------------------------------
+
+Assuming ALPHA, DIGIT, ASCII (where ASCII is any ascii character
+from decimal value 32 to 126, inclusive). We also are using EOL to
+denote the end of a line in the source file.
+
+  ESCAPE-VAL = "|" | "," | "'" | <"> | "n"
+             | "t" | "f" | "v" | "\"
+  
+  ESCAPED = "\" ESCAPE-VAL
+  
+  SAFE-PUNC = "!" | "@" | "#" | "$" | "%" | "^" | "&"
+            | "*" | "(" | ")" | "-" | "=" | "_" | "+"
+            | "[" | "]" | "{" | "}" | ":" | ";" | "'"
+            | "." | "?" | "/" | "<" | ">" 
+
+  SAFE-CHAR = ALPHA | DIGIT | ESCAPED | SAFE-PUNC
+
+  LWS  = <a single linear whitespace character>
+
+  compiler-var = +Alpha
+
+Note that `SAFE-PUNC` excludes double-quotes, pipes, and commas.
+
+
+Reserve definitions are fairly straightforward:
+
+  reserve = "reserve" compiler-var "(" NUMBER ")"
+              +( +LWS compiler-var "(" NUMBER ")" ) EOL
+
+As are builtins:
+
+  builtin-name = +Alpha
+  builtin      = builtin-name +LWS *( compiler-var | NUMBER )
+                   [ "->" +compiler-var ] EOL
+
+We may wish to change this slightly to accept other forms of
+direct input, instead of just numbers: hex, octal, etc.
+
+Pattern definitions are where it starts to get more complex.
+
+  singleton-char  = SAFE-CHAR | <">
+  char-range      = singleton-char "-" singleton-char
+  char-range-elem = ( singleton-char | char-range )
+  char-ranges     = "<|" ( char-range-elem ) *( "," char-range-elem ) "|>"
+ 
+  string-literal  = <"> +( SAFE-CHAR | "|" | "," ) <">
+
+
+  pat-elem-succ = "&" ( pat-elem | "|" | "+" | "*" | "(" | ")" )
+  
+  pat-elem-rep-tail = pat-elem
+                    | "(" *LWS ( pat-elem-succ | pat-elem )
+                       +( +LWS ( pat-elem-succ | pat-elem ) ) *LWS ")"
+
+  pat-elem-rep0   = "*" *LWS pat-elem-rep-tail
+  pat-elem-rep1   = "*" *LWS pat-elem-rep-tail
+  pat-elem-group  = "(" *LWS pat-elem +( +LWS pat-elem ) ")"
+  pat-elem-either = "(" *LWS pat-elem +( *LWS "|" *LWS pat-elem ) ")"
+
+  pat-elem = compiler-var
+           | char-ranges
+           | string-literal
+           | pat-elem-rep0
+           | pat-elem-rep1
+           | pat-elem-group
+           | pat-elem-either
+
+  pattern-def = "pattern" +LWS compiler-var *LWS ":" *LWS +( pat-elem ) EOL
+
+Note that these definitions are fairly restrictive in where
+whitespace is allowed. This is intentional.
+
+More complicated is the definition for rules:
+
+  paren-match = "(" *LWS [ compiler-var +( "," *LWS compiler-var ) *LWS ] ")"
+
+  ; Note: a@Value is just shorthand we've built in for (a)@Value
+  match-value  = ( compiler-var | paren-match ) *LWS "@" *LWS compiler-var
+
+  match-string = compiler-var *LWS "~" *LWS pat-elem
+
+  rule-elem    = match-value
+               | match-string
+               | pat-elem
+
+  ; akin to "return"
+  yield        = [ compiler-var +( +LWS compiler-var ) ] EOL
+
+  rule-def     = "rule" +LWS compiler-var *LWS ":" *LWS +rule-elem
+                   "{" EOL *directive yield "}" EOL
+
+where we haven't yet defined directive. Putting it all together,
+we get:
+
+  ; We might want to change this to allow non-ascii characters,
+  ; but this is fine for now.
+  code-block = *ASCII EOL
+             | "{" EOL +( "|" *ASCII EOL ) ">" *LWS "}" EOL
+
+  lines-of-code = ">" *LWS compiler-var *LWS "<-" *LWS code-block
+
+  directive = lines-of-code
+            | reserve
+            | builtin
+            | pattern-def
+            | rule-def
+
