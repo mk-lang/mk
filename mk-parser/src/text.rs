@@ -83,11 +83,28 @@ impl ReadMany {
     }
 }
 
-// We make the buffer have a size of 4096 so that we can efficiently read
-// each file sector
+// This is the size that the standard library uses internally for reading from
+// files, so it should have no overhead aside from copy the bits
 const SOURCE_BUF_SIZE: usize = 4096;
 
-// TODO: Document
+/// A byte-stream to [provide] to `Parser`s
+///
+/// # Usage
+///
+/// This will typically be created from a file for use directly with a parser:
+/// ```compile_fail
+/// use std::io::Read;
+/// use std::fs::File;
+///
+/// let mut file = File::open("foo.txt")?;
+/// let src = Source::new(file);
+///
+/// let parser = { ... };
+///
+/// let result = parser.parse(src, false);
+/// ```
+///
+/// [provide]: ../trait.DynParser.html#tymethod.parse
 // Need to make a note about how it's **only** utf-8
 // Note that it assumes EOF if the reader gives 0 bytes
 pub struct Source<R: Read> {

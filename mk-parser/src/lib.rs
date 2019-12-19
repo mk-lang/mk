@@ -1,86 +1,83 @@
+// TODO: Add more here.
 //! The utilities for creating, defining, and using parsers
 
-// TODO: Document
 pub mod bytes;
 pub mod text;
-mod combinators;
 mod fundamentals;
+mod combinators;
+pub mod utils;
 
-// For those searching, these each contain:
-// Combinators:
-// * Map, Repeat, Either
-// Fundamentals:
-// * ByteLiteral, ByteRange, ByteSeq, StringLit, CharLit, CharRange
-pub use combinators::*;
-pub use fundamentals::*;
+use self::{
+    utils::{LazyString, Pos},
+    text::Source,
+};
 
-use std::fmt::{self, Display, Formatter};
+pub use fundamentals::{
+    ByteLiteral,
+    ByteRange,
+    ByteSeq,
+    StringLit,
+    CharLit,
+    CharRange,
+    byte_lit,
+    byte_range,
+    byte_seq,
+    string_lit,
+    char_lit,
+    char_range,
+};
+
+pub use combinators::{
+    any,
+    all,
+    Map,
+    Repeat,
+    Either,
+    DynAny,
+};
+
 use std::io::Read;
 
-pub struct LazyString<'a>(Box<dyn 'a + FnOnce() -> String>);
-
-impl From<LazyString<'_>> for String {
-    fn from(lazy: LazyString) -> String {
-        lazy.0()
-    }
-}
-
-impl<'a> LazyString<'a> {
-    pub fn new<F: 'a + FnOnce() -> String>(f: F) -> LazyString<'a> {
-        LazyString(Box::new(f))
-    }
-}
-
-// TODO: Document
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Pos {
-    // Deriving PartialOrd and Ord only works because `line` is before `col`.
-    // Per the documentation for PartialOrd:
-    // "When derived on structs, it will produce a lexicographic ordering based
-    //  on the top-to-bottom declaration order of the struct's members"
-    pub line: u32,
-    pub col: u32,
-}
-
-impl Display for Pos {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}:{}", self.line, self.col)
-    }
-}
-
-pub enum ParseResult<'a, T> {
+/// Indicates the outcome of a parsing attempt.
+///
+/// The methods are all the various deconstructors of the type. The only complex
+/// piece of behavior to do with a `ParseResult` is the `i64` in the `Fail`
+/// variant. There is information about it [there](#variant.Fail).
+#[must_use = "this `ParseResult` may be an `Error` variant, which should be handled"]
+pub enum ParseResult<T> {
     /// Indicates a successful parse
     Success(T, Pos),
 
-    /// `Fail` indicates that there was no parse result found, and gives the
-    /// number of nested combinators to break out of. Negative values will
-    /// have the effect of failing through the entire stack (unless some other
-    /// parser later handles it). This value is usually zero.
+    /// Indicates that the parser did not find a match.
     ///
-    /// The provided `String` gives an attached error message, if it is
-    /// applicable.
-    Fail(Pos, i64, Option<LazyString<'a>>),
+    /// A failure message can optionally be supplied, given by the
+    /// `Option<LazyString>`; this will be suggested (or not) by the value of
+    /// [`msg_hint`] given to the [`Parser`].
+    ///
+    /// The position of the original failure in the matching process is also
+    /// returned - even though this may sometimes be immediately obvious from
+    /// context.
+    ///
+    /// Lastly, the `i64` in the tuple provides the number of nested parsers to
+    /// break out of. Some combinators (like `Map`) will simply pass the value,
+    /// whereas others (like `Either`) will decrement it, or perform other
+    /// operations therein. Typically, a value of 0 indicates a "normal" fail,
+    /// values greater than zero cause finitely many nested parsers to fail,
+    /// and values less than zero will fail all the way down the stack.
+    ///
+    /// [`msg_hint`]: trait.Parser.html#tymethod.parse
+    /// [`Parser`]: trait.Parser.html
+    Fail(Pos, i64, Option<LazyString>),
 
     /// `Error` indicates that a fatal error has occured while parsing and that
     /// parsing should immediately fail at every level.
+    ///
+    /// This will usually occur if there was an error reading from a file.
     Error(std::io::Error),
 }
 
-impl<'a, T> ParseResult<'a, T> {
-    pub fn is_error(&self) -> bool {
-        match self {
-            ParseResult::Error(_) => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_fail(&self) -> bool {
-        match self {
-            ParseResult::Fail(_, _, _) => true,
-            _ => false,
-        }
-    }
-
+impl<T> ParseResult<T> {
+    /// Returns whether the `ParseResult` is a `Success` variant
     pub fn is_success(&self) -> bool {
         match self {
             ParseResult::Success(_, _) => true,
@@ -88,6 +85,24 @@ impl<'a, T> ParseResult<'a, T> {
         }
     }
 
+    /// Returns whether the `ParseResult` is a `Fail` variant
+    pub fn is_fail(&self) -> bool {
+        match self {
+            ParseResult::Fail(_, _, _) => true,
+            _ => false,
+        }
+    }
+
+    /// Returns whether the `ParseResult` is a `Error` variant
+    pub fn is_error(&self) -> bool {
+        match self {
+            ParseResult::Error(_) => true,
+            _ => false,
+        }
+    }
+
+    // Internal function for producing error messages
+    #[inline(always)]
     fn val_type_str(&self) -> &'static str {
         match self {
             ParseResult::Success(_, _) => "Success",
@@ -96,26 +111,10 @@ impl<'a, T> ParseResult<'a, T> {
         }
     }
 
-    pub fn unwrap_error(self) -> std::io::Error {
-        match self {
-            ParseResult::Error(e) => e,
-            _ => panic!(
-                "Called `ParseResult::unwrap_error()` on a `{}` value",
-                self.val_type_str()
-            ),
-        }
-    }
-
-    pub fn unwrap_fail(self) -> (Pos, i64, Option<LazyString<'a>>) {
-        match self {
-            ParseResult::Fail(p, i, m) => (p, i, m),
-            _ => panic!(
-                "Called `ParseResult::unwrap_fail()` on a `{}` value",
-                self.val_type_str()
-            ),
-        }
-    }
-
+    /// Unwraps the `Success` value, yielding the inner value and its [position]
+    /// in the source
+    /// 
+    /// [position]: utils/struct.Pos.html
     pub fn unwrap(self) -> (T, Pos) {
         match self {
             ParseResult::Success(t, p) => (t, p),
@@ -125,53 +124,82 @@ impl<'a, T> ParseResult<'a, T> {
             ),
         }
     }
+
+    /// Extracts a `Fail` value from the `ParseResult`
+    pub fn unwrap_fail(self) -> (Pos, i64, Option<LazyString>) {
+        match self {
+            ParseResult::Fail(p, i, m) => (p, i, m),
+            _ => panic!(
+                "Called `ParseResult::unwrap_fail()` on a `{}` value",
+                self.val_type_str()
+            ),
+        }
+    }
+
+    /// Extracts an `Error` value from the `ParseResult`
+    pub fn unwrap_error(self) -> std::io::Error {
+        match self {
+            ParseResult::Error(e) => e,
+            _ => panic!(
+                "Called `ParseResult::unwrap_error()` on a `{}` value",
+                self.val_type_str()
+            ),
+        }
+    }
 }
 
-// TODO: Do we actually need Clone?
-pub trait Parser<'a, R: Read>: Clone {
+/// The backbone of the [`Parser`] trait
+///
+/// This trait is made distinct in order to allow trait objects - hence the
+/// prefix "Dyn". The [`Parser`] trait is a supertrait of `DynParser`, so this
+/// is implemented for all `Parsers`.
+///
+/// Implementing your own parser can be done simply by implementing [`parse`]
+/// here.
+///
+/// [`Parser`]: trait.Parser.html
+/// [`parse`]: #tymethod.parse
+pub trait DynParser<R: Read> {
+    /// The type produced by parsing
     type Output;
 
     // TODO: Note msg_hint suggests that `ParseResult::Fail` should give `None`.
-    // Also note that this is the only function that should be implemented. All
-    // provided functions should not be altered.
     //
-    // Another note about `msg_hint`: All "fundamental" values will
-    fn parse(
-        &'a self,
-        text: &mut text::Source<R>,
-        msg_hint: bool,
-    ) -> ParseResult<'a, Self::Output>;
+    // Another note about `msg_hint`: All "fundamental" values will follow this,
+    // but combinators may override this when given non-zero fail values
+    /// Parses the input text into the output type, consuming bytes as needed
+    /// 
+    /// This function works as expected - successive (successful) parse attempts
+    /// will not consume any more of the `Source` than required.
+    /// 
+    /// [`ParseResult`]: enum.ParseResult.html
+    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<Self::Output>;
+}
 
-    // TODO: Document
-    fn map<B, F>(self, f: F) -> Map<'a, F, Self::Output, B, Self, R>
+// NOTE: None of the functions here are meant to be implemented by anyone else.
+// They are all provided in their entirety as "methods" on existing types.
+//
+// ... something about it being the primary parser trait
+// ... something about "the main function is DynParser.parse"
+pub trait Parser<R: Read>: DynParser<R> + Sized {
+    /// An alias for [`combinators::map`]
+    ///
+    /// [`combinators::map`]: combinators/fn.map.html
+    fn map<B, F>(self, f: F) -> Map<R, F, Self::Output, B, Self>
     where
-        F: 'a + Clone + Fn(Self::Output) -> B,
+        F: 'static + Fn(Self::Output) -> B,
     {
         combinators::map(self, f)
     }
 
-    // TODO: Document
-    fn repeat(self, lower: usize, upper: Option<usize>) -> Repeat<'a, Self::Output, Self, R> {
+    fn repeat(self, lower: usize, upper: Option<usize>) -> Repeat<R, Self::Output, Self> {
         combinators::repeat(self, lower, upper)
     }
 
-    // TODO: Document
-    fn or<P>(self, other: P) -> Either<'a, Self::Output, Self, P, R>
+    fn or<P>(self, other: P) -> Either<R, Self::Output, Self, P>
     where
-        P: Parser<'a, R, Output=Self::Output>
+        P: Parser<R, Output=Self::Output>,
     {
         combinators::either(self, other)
-    }
-}
-
-impl<'a, R, F, O> Parser<'a, R> for F
-where
-    R: Read,
-    F: 'a + Fn(&mut text::Source<R>, bool) -> ParseResult<'a, O> + Clone,
-{
-    type Output = O;
-
-    fn parse(&self, text: &mut text::Source<R>, msg_hint: bool) -> ParseResult<'a, O> {
-        self(text, msg_hint)
     }
 }

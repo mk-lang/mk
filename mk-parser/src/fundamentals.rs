@@ -1,12 +1,20 @@
 use crate::{
+    Parser,
+    DynParser,
+    ParseResult,
+    utils::LazyString,
+    text::{
+        Source,
+        ReadSingle,
+        ReadMany,
+    },
     bytes,
-    text::{ReadMany, ReadSingle, Source},
-    LazyString, ParseResult, Parser,
 };
 
-use std::convert::TryInto;
-use std::io::Read;
-use std::marker::PhantomData;
+use std::{
+    io::Read,
+    convert::TryInto,
+};
 
 // Helper function
 #[inline(always)]
@@ -19,18 +27,18 @@ fn byte_name(b: u8) -> String {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ByteLiteral<'a>(u8, PhantomData<&'a ()>);
+pub struct ByteLiteral(u8);
 
 #[inline(always)]
-pub fn byte_lit<'a>(b: u8) -> ByteLiteral<'a> {
-    ByteLiteral(b, PhantomData)
+pub fn byte_lit(b: u8) -> ByteLiteral {
+    ByteLiteral(b)
 }
 
-impl<'a, R: Read> Parser<'a, R> for ByteLiteral<'a> {
+impl<R: Read> DynParser<R> for ByteLiteral {
     type Output = u8;
 
     #[inline(always)]
-    fn parse(&'a self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<'a, u8> {
+    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<u8> {
         match text.read_single() {
             ReadSingle::Error(e) => ParseResult::Error(e),
             ReadSingle::EOF(pos) => {
@@ -67,27 +75,27 @@ impl<'a, R: Read> Parser<'a, R> for ByteLiteral<'a> {
     }
 }
 
+impl<R: Read> Parser<R> for ByteLiteral {}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ByteRange<'a> {
+pub struct ByteRange {
     lower: u8,
     upper: u8,
-    _marker: PhantomData<&'a ()>,
 }
 
 #[inline(always)]
-pub fn byte_range<'a>(lower: u8, upper: u8) -> ByteRange<'a> {
+pub fn byte_range(lower: u8, upper: u8) -> ByteRange {
     ByteRange {
         lower,
         upper,
-        _marker: PhantomData,
     }
 }
 
-impl<'a, R: Read> Parser<'a, R> for ByteRange<'a> {
+impl<R: Read> DynParser<R> for ByteRange {
     type Output = u8;
 
     #[inline(always)]
-    fn parse(&'a self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<'a, u8> {
+    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<u8> {
         match text.read_single() {
             ReadSingle::Error(e) => ParseResult::Error(e),
             ReadSingle::EOF(pos) => {
@@ -133,19 +141,21 @@ impl<'a, R: Read> Parser<'a, R> for ByteRange<'a> {
     }
 }
 
+impl<R: Read> Parser<R> for ByteRange {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ByteSeq<'a>(Box<[u8]>, PhantomData<&'a ()>);
+pub struct ByteSeq(Box<[u8]>);
 
 #[inline(always)]
-pub fn byte_seq<'a, S: Into<Box<[u8]>>>(seq: S) -> ByteSeq<'a> {
-    ByteSeq(seq.into(), PhantomData)
+pub fn byte_seq<S: Into<Box<[u8]>>>(seq: S) -> ByteSeq {
+    ByteSeq(seq.into())
 }
 
-impl<'a, R: Read> Parser<'a, R> for ByteSeq<'a> {
+impl<R: Read> DynParser<R> for ByteSeq {
     type Output = Vec<u8>;
 
     #[inline(always)]
-    fn parse(&'a self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<'a, Vec<u8>> {
+    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<Vec<u8>> {
         match text.read_many(self.0.len()) {
             ReadMany::Error(e) => ParseResult::Error(e),
             ReadMany::EOF(pos) => {
@@ -189,40 +199,39 @@ impl<'a, R: Read> Parser<'a, R> for ByteSeq<'a> {
     }
 }
 
+impl<R: Read> Parser<R> for ByteSeq {}
+
 #[derive(Clone,Debug)]
-pub struct StringLit<'a> {
+pub struct StringLit {
     lit: String,
-    psr: ByteSeq<'a>,
-    _marker: PhantomData<&'a ()>,
+    psr: ByteSeq,
 }
 
 #[inline(always)]
-pub fn string_lit<'a, S: Into<String>>(s: S) -> StringLit<'a> {
+pub fn string_lit<S: Into<String>>(s: S) -> StringLit {
     let lit = s.into();
     let psr = byte_seq(Vec::from(lit.clone()));
     StringLit {
         lit,
         psr,
-        _marker: PhantomData,
     }
 }
 
-impl<'a, R: Read> Parser<'a, R> for StringLit<'a> {
-    type Output = &'a str;
+impl<R: Read> DynParser<R> for StringLit {
+    type Output = String;
 
     #[inline(always)]
-    fn parse(&'a self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<'a, &'a str> {
+    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<String> {
         match self.psr.parse(text, false) {
             ParseResult::Error(e) => ParseResult::Error(e),
             ParseResult::Success(_,p) => {
-                // let lit_ref: &'b str = &self.lit;
-                ParseResult::Success(&self.lit, p)
+                ParseResult::Success(self.lit.clone(), p)
             }
             ParseResult::Fail(p,_,s) => if msg_hint {
-                let lit_ref: &'a str = &self.lit;
+                let lit_clone = self.lit.clone();
                 ParseResult::Fail(p, 0, Some(LazyString::new(move || {
                     format!("Failed to find string \"{}\":\n{}",
-                            &lit_ref, String::from(s.unwrap()))
+                            lit_clone, String::from(s.unwrap()))
                 })))
             } else {
                 ParseResult::Fail(p, 0, None)
@@ -231,32 +240,32 @@ impl<'a, R: Read> Parser<'a, R> for StringLit<'a> {
     }
 }
 
+impl<R: Read> Parser<R> for StringLit {}
+
 #[derive(Clone,Debug)]
-pub struct CharLit<'a> {
+pub struct CharLit {
     lit: char,
-    psr: ByteSeq<'a>,
-    _marker: PhantomData<&'a ()>,
+    psr: ByteSeq,
 }
 
 // TODO: It would be nice to have no cost for single-byte characters with
 // `char_lit` as compared to `byte_lit`
 #[inline(always)]
-pub fn char_lit<'a>(c: char) -> CharLit<'a> {
+pub fn char_lit(c: char) -> CharLit {
     let mut bs = [0u8; 4];
 
     let psr = byte_seq(Vec::from(c.encode_utf8(&mut bs).as_bytes()));
     CharLit {
         lit: c,
         psr,
-        _marker: PhantomData,
     }
 }
 
-impl<'a, R: Read> Parser<'a, R> for CharLit<'a> {
+impl<R: Read> DynParser<R> for CharLit {
     type Output = char;
 
     #[inline(always)]
-    fn parse(&'a self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<'a, char> {
+    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<char> {
         match self.psr.parse(text, false) {
             ParseResult::Error(e) => ParseResult::Error(e),
             ParseResult::Success(_,p) => ParseResult::Success(self.lit, p),
@@ -273,25 +282,24 @@ impl<'a, R: Read> Parser<'a, R> for CharLit<'a> {
     }
 }
 
+impl<R: Read> Parser<R> for CharLit {}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct CharRange<'a> {
+pub struct CharRange {
     lower: u32,
     upper: u32,
-    _marker: PhantomData<&'a ()>,
 }
 
-pub fn char_range<'a>(lower: char, upper: char) -> CharRange<'a> {
+pub fn char_range(lower: char, upper: char) -> CharRange {
     CharRange {
         lower: lower as u32,
         upper: upper as u32,
-        _marker: PhantomData,
     }
 }
 
-impl<'a, R: Read> Parser<'a, R> for CharRange<'a> {
+impl<R: Read> DynParser<R> for CharRange {
     type Output = char;
-
-    fn parse(&'a self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<'a, char> {
+    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<char> {
         // TODO: This function can be optimized much more than it is now.
 
         // Helper function to avoid code repetition when we fail
@@ -392,10 +400,12 @@ impl<'a, R: Read> Parser<'a, R> for CharRange<'a> {
     }
 }
 
+impl<R: Read> Parser<R> for CharRange {}
+
 #[cfg(test)]
 mod tests {
     use crate::text::Source;
-    use crate::Parser;
+    use crate::DynParser;
 
     #[test]
     fn lazy_string() {
