@@ -1,23 +1,27 @@
+//! The fundamental `Parser`s, used for direct interaction with the `Source`
+//!
+//! The [`Parser`]s defined in this module are not typically used outside of
+//! the internal definitions of other parsers in this crate, but you are free
+//! to have a look. They may be useful if you are looking to do lower-level
+//! parsing operations.
+//!
+//! This module consists only of parser definitions. Some have an associated
+//! function to construct them.
+//!
+//! [`Parser`]: ../trait.Parser.html
+
 use crate::{
-    Parser,
-    DynParser,
-    ParseResult,
+    source::{ReadMany, ReadSingle, Source},
     utils::LazyString,
-    text::{
-        Source,
-        ReadSingle,
-        ReadMany,
-    },
-    bytes,
+    DynParser, ParseResult, Parser,
 };
 
-use std::{
-    io::Read,
-    convert::TryInto,
-};
+use std::{marker::PhantomData, borrow::Borrow, ops::{BitOr, Add}};
 
-// Helper function
-#[inline(always)]
+////////////////////////////////////////////////////////////
+
+// Helper function for providing failure messages
+
 fn byte_name(b: u8) -> String {
     if b.is_ascii_graphic() {
         ['\'', b as char, '\''].iter().collect()
@@ -26,20 +30,278 @@ fn byte_name(b: u8) -> String {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ByteLiteral(u8);
+////////////////////////////////////////////////////////////
 
-#[inline(always)]
-pub fn byte_lit(b: u8) -> ByteLiteral {
-    ByteLiteral(b)
+/// Dummy parser that always succeeds
+///
+/// This parser can be thought of as one of the fundamental mathematical
+/// objects necessary of parser combinators. Outside of that, it doesn't really
+/// have a practial use, except for testing.
+///
+/// # Example
+///
+/// ```
+/// use mk_parser::{DynParser, ParseResult, source::Source, utils::Pos};
+/// use mk_parser::fundamentals::Null;
+///
+/// let text = "foobar";
+/// let mut src = Source::new(text.as_bytes());
+///
+/// let psr = Null;
+/// assert_eq!(psr.parse(&mut src, false).unwrap(), ((), Pos::from((1, 1))));
+/// ```
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Null;
+
+impl DynParser for Null {
+    type Output = ();
+
+    fn parse(&self, src: &mut Source, _msg_hint: bool) -> ParseResult<()> {
+        ParseResult::Success((), src.pos())
+    }
 }
 
-impl<R: Read> DynParser<R> for ByteLiteral {
+impl Parser for Null {}
+
+impl<P: Parser<Output = ()>> BitOr<P> for Null {
+    impl_bitor!(P);
+}
+
+impl<P: Parser<Output = ()>> Add<P> for Null {
+    impl_add!(P);
+}
+
+/// Dummy parser that always fails
+///
+/// In much the same way that [`Null`] always succeeds, this parser will always
+/// fail, producing a `ParseResult::Fail`, where the second and third positions
+/// in the tuple are given by `lvl` and `msg`.
+///
+/// In a similar fashion to `Null`, this parser doesn't have much of a use case
+/// outside of testing, but it's here because it is still a kind of fundamental
+/// parser in the mathematical sense.
+///
+/// # Examples
+///
+/// ```
+/// use mk_parser::{DynParser, ParseResult, source::Source};
+/// use mk_parser::fundamentals::{Fail, fail};
+///
+/// let text = "foobar";
+/// let mut src = Source::new(text.as_bytes());
+///
+/// let psr: Fail<()> = fail();
+/// assert!(psr.parse(&mut src, false).is_fail());
+/// ```
+/// And for more advanced cases:
+/// ```
+/// # use mk_parser::{DynParser, ParseResult, source::Source};
+/// # use mk_parser::fundamentals::Fail;
+/// # let text = "foobar";
+/// # let mut src = Source::new(text.as_bytes());
+/// let psr: Fail<()> = Fail {
+///     lvl: 1,
+///     msg: Some("failed!".into()),
+///     .. Fail::default()
+/// };
+///
+/// let res = psr.parse(&mut src, true);
+/// assert!(res.is_fail());
+/// let (_, lvl, msg) = res.unwrap_fail();
+/// assert_eq!(lvl, 1);
+/// assert_eq!(String::from(msg.unwrap()), "failed!");
+/// ```
+///
+/// Typically, usage of this type will be done with the [`fail`] function, but
+/// anything more than bare-bones usage requires instantiating the struct
+/// yourself.
+///
+/// As such, if you do require the more advanced functionality (unlikely unless
+/// you are a test), it may be worth looking at the implementation of `Default`
+/// for it. While not strictly required, it is stongly recommended that you use
+/// it instead of instantiating the final field, `_marker`, by yourself. More
+/// information can be found in its doc comment. As well as a **forwards
+/// compatibility note**.
+///
+/// [`Null`]: struct.Null.html
+/// [`fail`]: fn.fail.html
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fail<T> {
+    /// Sets the level to fail with - the second field in [`ParseResult::Fail`]
+    ///
+    /// Defaults to `0`. The meaning of this value can be found in the
+    /// documentation of [`ParseResult`].
+    ///
+    /// [`ParseResult::Fail`]: ../enum.ParseResult.html#variant.Fail
+    /// [`ParseResult`]: ../enum.ParseResult.html
+    pub lvl: i64,
+
+    /// Optionally gives a message to fail with
+    ///
+    /// This directly corresponds to the message field of [`ParseResult::Fail`],
+    /// and will - by default - respect the `msg_hint` argument to
+    /// [`DynParser::parse()`]. This can be changed with `ign_hint` below.
+    ///
+    /// [`ParseResult::Fail`]: ../enum.ParseResult.html#variant.Fail
+    /// [`DynParser::parse()`]: ../trait.DynParser.html#tymethod.parse
+    pub msg: Option<String>,
+
+    /// Dictates whether to override `msg_hint` and return a message anyways
+    ///
+    /// This will obviously have no effect if `msg` is `None`.
+    ///
+    /// This is largely made available for testing.
+    pub ign_hint: bool,
+
+    /// A marker to preserve the output type. This will be deprecated.
+    ///
+    /// Because all generic parameters of a struct must be used within that
+    /// struct, we need some way to preserve `T`, so we do that here.
+    ///
+    /// It will often be easier to instead fill from `Default::default()`, so
+    /// it is recommended to do that. The second example above demonstrates
+    /// this.
+    ///
+    /// # Forwards compatibility
+    ///
+    /// This field will be removed once the [never type] is stabilized, which
+    /// looks to be relatively soon, in addition to the type parameter `T`; the
+    /// implementation of `DynParser` will switch to using `!` as its output
+    /// type.
+    ///
+    /// [never type]: https://doc.rust-lang.org/std/primitive.never.html
+    pub _marker: PhantomData<T>,
+}
+
+/// Returns the default [`Fail`] parser
+///
+/// Example usage can be found [here].
+///
+/// [`Fail`]: struct.Fail.html
+/// [here]: struct.Fail.html#examples
+pub fn fail<T>() -> Fail<T> { Fail::default() }
+
+impl<T> Default for Fail<T> {
+    fn default() -> Self {
+        Fail {
+            lvl: 0,
+            msg: None,
+            ign_hint: false,
+            _marker: PhantomData,
+        }
+    }
+}
+
+// TODO: When the never type gets stabilized, change the output type to `!` and
+// remove the generic type parameter.
+impl<T> DynParser for Fail<T> {
+    type Output = T;
+
+    fn parse(&self, src: &mut Source, msg_hint: bool) -> ParseResult<T> {
+        if let (true, Some(m)) = (msg_hint || self.ign_hint, self.msg.as_ref()) {
+            let m = m.clone();
+            ParseResult::Fail(src.pos(), self.lvl, Some(LazyString::new(move || m)))
+        } else {
+            ParseResult::Fail(src.pos(), self.lvl, None)
+        }
+    }
+}
+
+impl<T> Parser for Fail<T> {}
+
+impl<T, P: Parser<Output = T>> BitOr<P> for Fail<T> {
+    impl_bitor!(P);
+}
+
+impl<T, P: Parser<Output = T>> Add<P> for Fail<T> {
+    impl_add!(P);
+}
+
+/// Parser that takes bytes while a predicate is met
+///
+/// # Examples
+///
+/// Constructing the [`word`] parser ourself:
+/// ```
+/// use mk_parser::{DynParser, ParseResult, source::Source};
+/// use mk_parser::fundamentals::TakeWhile;
+///
+/// let s = "more than one word";
+/// let mut src = Source::new(s.as_bytes());
+///
+/// let psr = TakeWhile(|b| b.is_ascii_alphabetic());
+/// let res = psr.parse(&mut src, false);
+/// assert_eq!(res.unwrap().0, "more".as_bytes());
+/// ```
+///
+/// [`word`]: ../basics/fn.word.html
+#[derive(Copy, Clone, Debug)]
+pub struct TakeWhile<F: Fn(u8) -> bool>(pub F);
+
+impl<F: Fn(u8) -> bool> DynParser for TakeWhile<F> {
+    type Output = Vec<u8>;
+
+    fn parse(&self, src: &mut Source, _msg_hint: bool) -> ParseResult<Vec<u8>> {
+        match src.read_while(|b, _| self.0(b)) {
+            ReadMany::Error(e) => ParseResult::Error(e),
+            ReadMany::Bytes(bs, pos) => ParseResult::Success(bs, pos),
+            ReadMany::EOF(_) => {
+                panic!("Unexpected EOF from calling `Source::read_while`");
+            }
+        }
+    }
+}
+
+impl<F: Fn(u8) -> bool> Parser for TakeWhile<F> {}
+
+impl<F, P> BitOr<P> for TakeWhile<F>
+where
+    F: Fn(u8) -> bool,
+    P: Parser<Output = <Self as DynParser>::Output>,
+{
+    impl_bitor!(P);
+}
+
+impl<F, P> Add<P> for TakeWhile<F>
+where
+    F: Fn(u8) -> bool,
+    P: Parser<Output = <Self as DynParser>::Output>,
+{
+    impl_add!(P);
+}
+
+/// Parser that matches exactly on the given byte
+///
+/// # Examples
+///
+/// ```
+/// use mk_parser::{DynParser, ParseResult, source::Source};
+/// use mk_parser::fundamentals::ByteLit;
+///
+/// let mut src = Source::new(&[0x66_u8, 0x6F, 0x6F] as &[u8]);
+///
+/// let res = ByteLit(0x66).parse(&mut src, false);
+/// assert!(res.is_success());
+///
+/// let res = ByteLit(0x6F).parse(&mut src, false);
+/// assert!(res.is_success());
+///
+/// let res = ByteLit(0x60).parse(&mut src, false);
+/// assert!(res.is_fail());
+/// ```
+/// Please note that this is not the recommended way to match a string. For
+/// that, see [`StringLit`].
+///
+/// [`StringLit`]: ../basics/struct.StringLit.html
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ByteLit(pub u8);
+
+impl DynParser for ByteLit {
     type Output = u8;
 
-    #[inline(always)]
-    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<u8> {
-        match text.read_single() {
+    fn parse(&self, src: &mut Source, msg_hint: bool) -> ParseResult<u8> {
+        match src.read_single() {
             ReadSingle::Error(e) => ParseResult::Error(e),
             ReadSingle::EOF(pos) => {
                 if msg_hint {
@@ -75,28 +337,51 @@ impl<R: Read> DynParser<R> for ByteLiteral {
     }
 }
 
-impl<R: Read> Parser<R> for ByteLiteral {}
+impl Parser for ByteLit {}
 
+impl<P: Parser<Output = u8>> BitOr<P> for ByteLit {
+    impl_bitor!(P);
+}
+
+impl<P: Parser<Output = u8>> Add<P> for ByteLit {
+    impl_add!(P);
+}
+
+/// Parser that matches on any byte within the given range, inclusive
+///
+/// The first element of the tuple gives the lower bound; the second gives the
+/// upper bound.
+///
+/// # Examples
+///
+/// ```
+/// use mk_parser::{DynParser, ParseResult, source::Source};
+/// use mk_parser::fundamentals::ByteRange;
+///
+/// let mut src = Source::new(&[0x61_u8, 0x63, 0x65, 0x67] as &[u8]);
+///
+/// let psr = ByteRange(0x62, 0x65);
+///
+/// // 0x61
+/// assert!(psr.parse(&mut src, false).is_fail());
+///
+/// // 0x63
+/// assert!(psr.parse(&mut src, false).is_success());
+///
+/// // 0x65
+/// assert!(psr.parse(&mut src, false).is_success());
+///
+/// // 0x67
+/// assert!(psr.parse(&mut src, false).is_fail());
+/// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ByteRange {
-    lower: u8,
-    upper: u8,
-}
+pub struct ByteRange(pub u8, pub u8);
 
-#[inline(always)]
-pub fn byte_range(lower: u8, upper: u8) -> ByteRange {
-    ByteRange {
-        lower,
-        upper,
-    }
-}
-
-impl<R: Read> DynParser<R> for ByteRange {
+impl DynParser for ByteRange {
     type Output = u8;
 
-    #[inline(always)]
-    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<u8> {
-        match text.read_single() {
+    fn parse(&self, src: &mut Source, msg_hint: bool) -> ParseResult<u8> {
+        match src.read_single() {
             ReadSingle::Error(e) => ParseResult::Error(e),
             ReadSingle::EOF(pos) => {
                 if msg_hint {
@@ -107,8 +392,8 @@ impl<R: Read> DynParser<R> for ByteRange {
                         Some(LazyString::new(move || {
                             format!(
                                 "Expected a byte at in range {} to {}, found EOF",
-                                byte_name(cloned.lower),
-                                byte_name(cloned.upper)
+                                byte_name(cloned.0),
+                                byte_name(cloned.1)
                             )
                         })),
                     )
@@ -117,7 +402,7 @@ impl<R: Read> DynParser<R> for ByteRange {
                 }
             }
             ReadSingle::Byte(b, pos) => {
-                if b >= self.lower && b <= self.upper {
+                if b >= self.0 && b <= self.1 {
                     ParseResult::Success(b, pos)
                 } else if msg_hint {
                     let cloned = *self;
@@ -127,8 +412,8 @@ impl<R: Read> DynParser<R> for ByteRange {
                         Some(LazyString::new(move || {
                             format!(
                                 "Expected a byte in range {} to {}, found {}",
-                                byte_name(cloned.lower),
-                                byte_name(cloned.upper),
+                                byte_name(cloned.0),
+                                byte_name(cloned.1),
                                 byte_name(b)
                             )
                         })),
@@ -141,33 +426,75 @@ impl<R: Read> DynParser<R> for ByteRange {
     }
 }
 
-impl<R: Read> Parser<R> for ByteRange {}
+impl Parser for ByteRange {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ByteSeq(Box<[u8]>);
-
-#[inline(always)]
-pub fn byte_seq<S: Into<Box<[u8]>>>(seq: S) -> ByteSeq {
-    ByteSeq(seq.into())
+impl<P: Parser<Output = u8>> BitOr<P> for ByteRange {
+    impl_bitor!(P);
 }
 
-impl<R: Read> DynParser<R> for ByteSeq {
+impl<P: Parser<Output = u8>> Add<P> for ByteRange {
+    impl_add!(P);
+}
+
+/// Parser that matches exactly on a given sequence of bytes
+///
+/// The generic parameter allows the flexibility to use many types for the
+/// sequence, notably `String`s and `Vec<u8>` (along with their borrowed
+/// counterparts, `&str` and `&[u8]`).
+///
+/// Note that this parser will always consume exactly as many bytes as is
+/// expected.
+///
+/// # Example
+///
+/// ```
+/// use mk_parser::{DynParser, ParseResult, source::Source};
+/// use mk_parser::fundamentals::ByteSeq;
+///
+/// let s = "foobarfoo";
+/// let mut src = Source::new(s.as_bytes());
+///
+/// let psr = ByteSeq("foo");
+///
+/// // getting the first "foo"
+/// assert!(psr.parse(&mut src, false).is_success());
+///
+/// // we fail to match, but still consume the three bytes from "bar"
+/// assert!(psr.parse(&mut src, false).is_fail());
+///
+/// // getting the second foo
+/// assert!(psr.parse(&mut src, false).is_success());
+/// ```
+#[repr(transparent)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ByteSeq<S>(pub S)
+where
+    S: AsRef<[u8]> + ToOwned,
+    S::Owned: 'static;
+
+impl<S> DynParser for ByteSeq<S>
+where
+    S: AsRef<[u8]> + ToOwned,
+    S::Owned: 'static,
+{
     type Output = Vec<u8>;
 
-    #[inline(always)]
-    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<Vec<u8>> {
-        match text.read_many(self.0.len()) {
+    // TODO: Determine whether it's faster to make incrementally compare vs.
+    // get the whole set
+    fn parse(&self, src: &mut Source, msg_hint: bool) -> ParseResult<Vec<u8>> {
+        match src.read_many(self.0.as_ref().len()) {
             ReadMany::Error(e) => ParseResult::Error(e),
             ReadMany::EOF(pos) => {
                 if msg_hint {
-                    let cloned = self.clone();
+                    let cloned = self.0.to_owned();
                     ParseResult::Fail(
                         pos,
                         0,
                         Some(LazyString::new(move || {
                             format!(
                                 "Expected byte sequence {:?}, found EOF",
-                                cloned.0.iter().map(|b| format!("{}", b))
+                                cloned.borrow().as_ref()
+                                    .iter().map(|b| format!("{}", b))
                             )
                         })),
                     )
@@ -179,14 +506,15 @@ impl<R: Read> DynParser<R> for ByteSeq {
                 if seq == self.0.as_ref() {
                     ParseResult::Success(seq, pos)
                 } else if msg_hint {
-                    let cloned = self.clone();
+                    let cloned = self.0.to_owned();
                     ParseResult::Fail(
                         pos,
                         0,
                         Some(LazyString::new(move || {
                             format!(
                                 "Expected byte sequence {:?}, found {:?}",
-                                cloned.0.iter().map(|b| format!("{}", b)),
+                                cloned.borrow().as_ref()
+                                    .iter().map(|b| format!("{}", b)),
                                 seq.iter().map(|b| format!("{}", b))
                             )
                         })),
@@ -199,219 +527,102 @@ impl<R: Read> DynParser<R> for ByteSeq {
     }
 }
 
-impl<R: Read> Parser<R> for ByteSeq {}
+impl<S> Parser for ByteSeq<S>
+where
+    S: AsRef<[u8]> + ToOwned,
+    S::Owned: 'static,
+{}
 
-#[derive(Clone,Debug)]
-pub struct StringLit {
-    lit: String,
-    psr: ByteSeq,
+impl<S, P> BitOr<P> for ByteSeq<S>
+where
+    S: AsRef<[u8]> + ToOwned,
+    S::Owned: 'static,
+    P: Parser<Output = Vec<u8>>,
+{
+    impl_bitor!(P);
 }
 
-#[inline(always)]
-pub fn string_lit<S: Into<String>>(s: S) -> StringLit {
-    let lit = s.into();
-    let psr = byte_seq(Vec::from(lit.clone()));
-    StringLit {
-        lit,
-        psr,
-    }
+impl<S, P> Add<P> for ByteSeq<S>
+where
+    S: AsRef<[u8]> + ToOwned,
+    S::Owned: 'static,
+    P: Parser<Output = Vec<u8>>,
+{
+    impl_add!(P);
 }
-
-impl<R: Read> DynParser<R> for StringLit {
-    type Output = String;
-
-    #[inline(always)]
-    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<String> {
-        match self.psr.parse(text, false) {
-            ParseResult::Error(e) => ParseResult::Error(e),
-            ParseResult::Success(_,p) => {
-                ParseResult::Success(self.lit.clone(), p)
-            }
-            ParseResult::Fail(p,_,s) => if msg_hint {
-                let lit_clone = self.lit.clone();
-                ParseResult::Fail(p, 0, Some(LazyString::new(move || {
-                    format!("Failed to find string \"{}\":\n{}",
-                            lit_clone, String::from(s.unwrap()))
-                })))
-            } else {
-                ParseResult::Fail(p, 0, None)
-            }
-        }
-    }
-}
-
-impl<R: Read> Parser<R> for StringLit {}
-
-#[derive(Clone,Debug)]
-pub struct CharLit {
-    lit: char,
-    psr: ByteSeq,
-}
-
-// TODO: It would be nice to have no cost for single-byte characters with
-// `char_lit` as compared to `byte_lit`
-#[inline(always)]
-pub fn char_lit(c: char) -> CharLit {
-    let mut bs = [0u8; 4];
-
-    let psr = byte_seq(Vec::from(c.encode_utf8(&mut bs).as_bytes()));
-    CharLit {
-        lit: c,
-        psr,
-    }
-}
-
-impl<R: Read> DynParser<R> for CharLit {
-    type Output = char;
-
-    #[inline(always)]
-    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<char> {
-        match self.psr.parse(text, false) {
-            ParseResult::Error(e) => ParseResult::Error(e),
-            ParseResult::Success(_,p) => ParseResult::Success(self.lit, p),
-            ParseResult::Fail(p,_,s) => if msg_hint {
-                let lit_cloned: char = self.lit;
-                ParseResult::Fail(p, 0, Some(LazyString::new(move || {
-                    format!("Failed to find character '{}':\n{}",
-                            lit_cloned, String::from(s.unwrap()))
-                })))
-            } else {
-                ParseResult::Fail(p, 0, None)
-            },
-        }
-    }
-}
-
-impl<R: Read> Parser<R> for CharLit {}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct CharRange {
-    lower: u32,
-    upper: u32,
-}
-
-pub fn char_range(lower: char, upper: char) -> CharRange {
-    CharRange {
-        lower: lower as u32,
-        upper: upper as u32,
-    }
-}
-
-impl<R: Read> DynParser<R> for CharRange {
-    type Output = char;
-    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<char> {
-        // TODO: This function can be optimized much more than it is now.
-
-        // Helper function to avoid code repetition when we fail
-        let handle_eof = |pos| {
-            if msg_hint {
-                let cloned = *self;
-                ParseResult::Fail(
-                    pos,
-                    0,
-                    Some(LazyString::new(move || {
-                        let lower: char = cloned.lower.try_into().unwrap();
-                        let upper: char = cloned.upper.try_into().unwrap();
-                        format!("Expected char between {} and {}, found EOF", lower, upper)
-                    })),
-                )
-            } else {
-                ParseResult::Fail(pos, 0, None)
-            }
-        };
-
-        // get the first byte to check the expected length
-        let (first, pos) = match text.read_single() {
-            ReadSingle::Error(e) => return ParseResult::Error(e),
-            ReadSingle::EOF(pos) => return handle_eof(pos),
-            ReadSingle::Byte(b, p) => (b, p),
-        };
-
-        let req_len = match bytes::expected_utf8_size(first) {
-            Err(_) | Ok(None) => {
-                return {
-                    if msg_hint {
-                        ParseResult::Fail(
-                            pos,
-                            0,
-                            Some(LazyString::new(move || {
-                                format!(
-                                    "{} {:#x} {}",
-                                    "Expected unicode character; next byte ",
-                                    first,
-                                    "is not a valid utf-8 starting byte"
-                                )
-                            })),
-                        )
-                    } else {
-                        ParseResult::Fail(pos, 0, None)
-                    }
-                }
-            }
-            Ok(Some(l)) => l as usize,
-        };
-
-        let mut bs = vec![first; req_len];
-        match text.read_many(req_len - 1) {
-            ReadMany::Error(e) => return ParseResult::Error(e),
-            ReadMany::EOF(pos) => return handle_eof(pos),
-            ReadMany::Bytes(bytes, _) => bs[1..].copy_from_slice(&bytes),
-        }
-
-        // get the unicode value of the bytes
-        let u_value = match bytes::decode_utf8(&bs) {
-            Err(_) => {
-                return if msg_hint {
-                    ParseResult::Fail(
-                        pos,
-                        0,
-                        Some(LazyString::new(move || {
-                            format!(
-                                "Expected unicode character, got invalid sequence {:?}",
-                                bs.iter().map(|b| format!("{:#x}", b))
-                            )
-                        })),
-                    )
-                } else {
-                    ParseResult::Fail(pos, 0, None)
-                }
-            }
-            // Err(_) => return ParseResult::Fail(None, 0),
-            Ok(v) => v,
-        };
-
-        if u_value >= self.lower && u_value <= self.upper {
-            ParseResult::Success(u_value.try_into().unwrap(), pos)
-        } else if msg_hint {
-            let cloned = *self;
-            ParseResult::Fail(
-                pos,
-                0,
-                Some(LazyString::new(move || {
-                    format!(
-                        "Parsed unicode value {:?} is outside the range {} to {}",
-                        u_value, cloned.lower, cloned.upper
-                    )
-                })),
-            )
-        } else {
-            ParseResult::Fail(pos, 0, None)
-        }
-    }
-}
-
-impl<R: Read> Parser<R> for CharRange {}
 
 #[cfg(test)]
 mod tests {
-    use crate::text::Source;
+    use crate::source::Source;
+    use crate::utils::Pos;
     use crate::DynParser;
 
     #[test]
-    fn lazy_string() {
-        let foo = || String::from("foo");
-        let lazy = super::LazyString::new(foo);
-        assert_eq!(String::from(lazy), "foo");
+    fn null() {
+        let s = "foobar";
+        let mut src = Source::new(s.as_bytes());
+        let res = super::Null.parse(&mut src, false);
+        assert!(!res.is_error());
+        assert!(!res.is_fail());
+        assert_eq!(res.unwrap().1, Pos::from((1, 1)));
+    }
+
+    #[test]
+    fn fail() {
+        let s = "foobar";
+        let mut src = Source::new(s.as_bytes());
+
+        let mut test = |lvl: i64, msg: Option<String>, ign_hint: bool, msg_hint: bool| {
+            let debug_str = format!(
+                "DEBUG: lvl: {}, msg: {:?}, ign_hint: {}, msg_hint: {}",
+                lvl, msg, ign_hint, msg_hint,
+            );
+
+            let psr: super::Fail<()> = super::Fail {
+                lvl,
+                msg: msg.clone(),
+                ign_hint,
+                .. Default::default()
+            };
+
+            let res = psr.parse(&mut src, msg_hint);
+            assert!(!res.is_error(), "{}", debug_str);
+            assert!(!res.is_success(), "{}", debug_str);
+
+            let (pos, l, m) = res.unwrap_fail();
+            assert_eq!(pos, Pos::from((1, 1)), "{}", debug_str);
+            assert_eq!(l, lvl, "{}", debug_str);
+
+            // The first case is the only case where the outputs don't match
+            if msg.is_some() && !msg_hint && !ign_hint {
+                assert!(m.is_none(), "{}", debug_str);
+            } else {
+                assert_eq!(msg, m.map(String::from), "{}", debug_str);
+            }
+        };
+
+        for &lvl in [-2, 0, 2].into_iter() {
+            for msg in [None, Some(String::from("sample msg"))].into_iter() {
+                for &ign_hint in [false, true].into_iter() {
+                    for &msg_hint in [false, true].into_iter() {
+                        test(lvl, msg.clone(), ign_hint, msg_hint);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn take_while() {
+        // Sample of getting a word
+        let s = "single word";
+        let mut src = Source::new(s.as_bytes());
+
+        let psr = super::TakeWhile(|b| b.is_ascii_alphabetic());
+        let res = psr.parse(&mut src, false);
+        assert!(!res.is_error());
+        assert!(!res.is_fail());
+        assert_eq!(res.unwrap().0, "single".as_bytes());
     }
 
     #[test]
@@ -423,7 +634,7 @@ mod tests {
 
         let tab = vec![0x00u8, 0x50, 0x62, 0x63, 0xFF, 0xFF];
         for (&b, &sb) in tab.iter().zip(s.iter()) {
-            let psr = super::byte_lit(b);
+            let psr = super::ByteLit(b);
 
             let res1 = psr.parse(&mut src1, false);
             let res2 = psr.parse(&mut src2, true);
@@ -453,7 +664,7 @@ mod tests {
 
         let tab = vec![(0x00, 0x00), (0x10, 0x59), (0x70, 0x80), (0xFF, 0x77)];
         for (&(lower, upper), &b) in tab.iter().zip(s.iter()) {
-            let psr = super::byte_range(lower, upper);
+            let psr = super::ByteRange(lower, upper);
 
             let res1 = psr.parse(&mut src1, false);
             let res2 = psr.parse(&mut src2, true);
@@ -488,7 +699,7 @@ mod tests {
             (vec![0x01, 0x02, 0x03, 0x04], true),
         ];
         for (seq, m) in tab.into_iter() {
-            let psr = super::byte_seq(seq.clone());
+            let psr = super::ByteSeq(seq.clone());
             let res1 = psr.parse(&mut src1, false);
             let res2 = psr.parse(&mut src2, true);
 
@@ -507,35 +718,5 @@ mod tests {
                 assert!(res2.unwrap_fail().2.is_some());
             }
         }
-    }
-
-    #[test]
-    fn string_lit() {
-        let s = String::from("foo bar string");
-        let mut src = Source::new(s.as_bytes());
-        assert!(super::string_lit("foo").parse(&mut src, false).is_success());
-        assert!(super::string_lit("abcde").parse(&mut src, false).is_fail());
-        assert!(super::string_lit("string")
-            .parse(&mut src, false)
-            .is_success());
-    }
-
-    #[test]
-    fn char_lit() {
-        let s = String::from("ab☺é");
-        let mut src = Source::new(s.as_bytes());
-        assert!(super::char_lit('a').parse(&mut src, false).is_success());
-        assert!(super::char_lit('c').parse(&mut src, false).is_fail());
-        assert!(super::char_lit('☺').parse(&mut src, false).is_success());
-        assert!(super::char_lit('é').parse(&mut src, false).is_success());
-    }
-
-    #[test]
-    fn char_range() {
-        let s = String::from("☺");
-        let mut src = Source::new(s.as_bytes());
-        assert!(super::char_range('a', '♋')
-            .parse(&mut src, false)
-            .is_success());
     }
 }

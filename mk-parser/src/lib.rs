@@ -1,42 +1,33 @@
-// TODO: Add more here.
+// TODO-DOC: Add more here: examples and general descriptions
 //! The utilities for creating, defining, and using parsers
 
+// Personal preference - It often aligns better, and can be more
+// concise than a typical "if" statement.
+#![allow(clippy::match_bool)]
+
+// Set a url for allowing "run" buttons on our doc examples
+// TODO: This won't work until we release the crate
+#![doc(html_playground_url = "https://play.rust-lang.org/")]
+
+#[macro_use]
+mod macros;
+
 pub mod bytes;
-pub mod text;
-mod fundamentals;
-mod combinators;
+pub mod source;
 pub mod utils;
 
+pub mod basics;
+pub mod combinators;
+pub mod fundamentals;
+pub mod handlers;
+
 use self::{
+    source::Source,
     utils::{LazyString, Pos},
-    text::Source,
 };
 
-pub use fundamentals::{
-    ByteLiteral,
-    ByteRange,
-    ByteSeq,
-    StringLit,
-    CharLit,
-    CharRange,
-    byte_lit,
-    byte_range,
-    byte_seq,
-    string_lit,
-    char_lit,
-    char_range,
-};
-
-pub use combinators::{
-    any,
-    all,
-    Map,
-    Repeat,
-    Either,
-    DynAny,
-};
-
-use std::io::Read;
+use combinators::{Map, Repeat, Either, Chain};
+use handlers::{FailLevel, Named};
 
 /// Indicates the outcome of a parsing attempt.
 ///
@@ -46,6 +37,8 @@ use std::io::Read;
 #[must_use = "this `ParseResult` may be an `Error` variant, which should be handled"]
 pub enum ParseResult<T> {
     /// Indicates a successful parse
+    ///
+    /// Gives the output type and the position it was found at
     Success(T, Pos),
 
     /// Indicates that the parser did not find a match.
@@ -102,7 +95,6 @@ impl<T> ParseResult<T> {
     }
 
     // Internal function for producing error messages
-    #[inline(always)]
     fn val_type_str(&self) -> &'static str {
         match self {
             ParseResult::Success(_, _) => "Success",
@@ -113,7 +105,7 @@ impl<T> ParseResult<T> {
 
     /// Unwraps the `Success` value, yielding the inner value and its [position]
     /// in the source
-    /// 
+    ///
     /// [position]: utils/struct.Pos.html
     pub fn unwrap(self) -> (T, Pos) {
         match self {
@@ -155,51 +147,121 @@ impl<T> ParseResult<T> {
 /// is implemented for all `Parsers`.
 ///
 /// Implementing your own parser can be done simply by implementing [`parse`]
-/// here.
+/// here and using the default implementation of [`Parser`].
 ///
 /// [`Parser`]: trait.Parser.html
 /// [`parse`]: #tymethod.parse
-pub trait DynParser<R: Read> {
+pub trait DynParser {
     /// The type produced by parsing
     type Output;
 
-    // TODO: Note msg_hint suggests that `ParseResult::Fail` should give `None`.
-    //
-    // Another note about `msg_hint`: All "fundamental" values will follow this,
-    // but combinators may override this when given non-zero fail values
-    /// Parses the input text into the output type, consuming bytes as needed
-    /// 
+    /// Parses the input source into the output type, consuming bytes as needed
+    ///
     /// This function works as expected - successive (successful) parse attempts
     /// will not consume any more of the `Source` than required.
-    /// 
-    /// [`ParseResult`]: enum.ParseResult.html
-    fn parse(&self, text: &mut Source<R>, msg_hint: bool) -> ParseResult<Self::Output>;
-}
-
-// NOTE: None of the functions here are meant to be implemented by anyone else.
-// They are all provided in their entirety as "methods" on existing types.
-//
-// ... something about it being the primary parser trait
-// ... something about "the main function is DynParser.parse"
-pub trait Parser<R: Read>: DynParser<R> + Sized {
-    /// An alias for [`combinators::map`]
     ///
-    /// [`combinators::map`]: combinators/fn.map.html
-    fn map<B, F>(self, f: F) -> Map<R, F, Self::Output, B, Self>
+    /// `msg_hint` serves as a suggestion for whether to provide a failure
+    /// message; i.e. whether the [`Fail`] variant of the result should be
+    /// `Some(LazyString(...))`. If true, a failure message has been requested.
+    ///
+    /// Note that all "fundamental" and "basic" parsers will respect `msg_hint`
+    /// in its entirety, but some combinators may not: If one of the parsers
+    /// they depend upon fails with a non-zero failure level AND has a message,
+    /// they they will override `msg_hint` and wrap the failure message anyways.
+    ///
+    /// [`ParseResult`]: enum.ParseResult.html
+    /// [`Fail`]: enum.ParseResult.html#variant.Fail
+    fn parse(&self, src: &mut Source, msg_hint: bool) -> ParseResult<Self::Output>;
+}
+
+/// The primary parsing trait
+///
+/// This trait exists in concert with [`DynParser`] to provide all of the
+/// methods on various types. The core functionality comes from
+/// `DynParser::parse()`, but most of the combinators require their arguments
+/// to be `Sized` - hence the existence of this trait.
+///
+/// Examples are provided at the crate root.
+///
+/// If you are implementing your own parser (a rare case!), there will likely
+/// be no reason to override the default method implementations here. They are
+/// used only to provide syntactic elegance to the functionality of the crate.
+///
+/// [`DynParser`]: trait.DynParser.html
+pub trait Parser: DynParser + Sized {
+
+    /// Shorthand for constructing [`combinators::Map`]
+    ///
+    /// `Map` will apply `f` to to the output of this parser.
+    ///
+    /// [`combinators::Map`]: combinators/struct.Map.html
+    fn map<F, T>(self, f: F) -> Map<Self, F, T>
     where
-        F: 'static + Fn(Self::Output) -> B,
+        F: 'static + Fn(Self::Output) -> T,
     {
-        combinators::map(self, f)
+        combinators::Map {
+            psr: self,
+            func: f,
+        }
     }
 
-    fn repeat(self, lower: usize, upper: Option<usize>) -> Repeat<R, Self::Output, Self> {
-        combinators::repeat(self, lower, upper)
+    /// Shorthand for constructing [`combinators::Repeat`]
+    ///
+    /// The lower bound indicates the minimum required number of repetitions to
+    /// have a successful parse, and the upper bound - if present - indicates
+    /// the maximum allowed number of repetitions. If `lower` is greater than
+    /// `upper`, the parser will never match.
+    ///
+    /// For more information, see [`Repeat`].
+    ///
+    /// [`combinators::Repeat`]: combinators/struct.Repeat.html
+    /// [`Repeat`]: combinators/struct.Repeat.html
+    fn repeat(self, lower: usize, upper: Option<usize>) -> Repeat<Self> {
+        Repeat {
+            lower,
+            upper,
+            psr: self,
+        }
     }
 
-    fn or<P>(self, other: P) -> Either<R, Self::Output, Self, P>
+    // TODO-DOC
+    fn or<P>(self, other: P) -> Either<Self, P>
     where
-        P: Parser<R, Output=Self::Output>,
+        P: Parser<Output = Self::Output>,
     {
-        combinators::either(self, other)
+        Either {
+            left: self,
+            right: other,
+        }
+    }
+
+    // TODO-DOC
+    fn and<P>(self, other: P) -> Chain<Self, P>
+    where
+        P: Parser,
+    {
+        Chain {
+            first: self,
+            second: other,
+        }
+    }
+
+    /// An alias for [`handlers::named`]
+    ///
+    /// [`handlers::named`]: handlers/fn.named.html
+    // TODO-DOC: Add example(s)
+    fn name<S: Into<String>>(self, name: S) -> Named<Self> {
+        handlers::named(self, name.into())
+    }
+
+    // TODO-DOC
+    fn expect(self) -> FailLevel<Self, fn(i64) -> i64> {
+        handlers::fail_level(self, |_| 1_i64)
+    }
+
+    // TODO-DOC
+    fn require(self) -> FailLevel<Self, fn(i64) -> i64> {
+        handlers::fail_level(self, |_| -1_i64)
     }
 }
+

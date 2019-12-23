@@ -1,15 +1,20 @@
-//! Purely for defining utilities that are used elsewhere in the crate.
+//! Defines [`Pos`] and [`LazyString`]
+//!
+//! **Note**: Due to the current limitations of rust-doc, the links above only
+//! work from the crate root. ☹
+//!
+//! [`Pos`]: utils/struct.Pos.html
+//! [`LazyString`]: utils/struct.LazyString.html
 
 use std::fmt::{self, Display, Formatter};
 
 /// A single-use, lazily-evaluated string.
 ///
-/// # Usage 
+/// # Usage
 ///
 /// Typically, `LazyString`s will be constructed with a closure in the following
 /// manner:
 /// ```
-/// # extern crate mk_parser;
 /// # use mk_parser::utils::LazyString;
 /// use std::string::ToString;
 ///
@@ -45,25 +50,24 @@ impl LazyString {
     }
 }
 
-/// Represents the position of a byte in a [`text::Source`].
+/// Represents the position of a byte in a [`Source`].
 ///
 /// Note that this distinctly counts **bytes**, not unicode characters.
 ///
 /// For convenience, `From<(u32, u32)>` is implemented for `Pos`: the first
 /// value gives the line, and the second gives the column.
 ///
-/// [`text::Source`]: ../text/struct.Source.html
+/// [`Source`]: ../source/struct.Source.html
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pos {
     // Deriving PartialOrd and Ord only works because `line` is before `col`.
     // Per the documentation for PartialOrd:
     // "When derived on structs, it will produce a lexicographic ordering based
     //  on the top-to-bottom declaration order of the struct's members"
-    
     /// The line in the source
     pub line: u32,
 
-    /// The column (by bytes - **not** characters) in the source
+    /// The column (by bytes - not characters) in the source
     pub col: u32,
 }
 
@@ -88,6 +92,13 @@ mod tests {
     use std::cmp::Ord;
 
     #[test]
+    fn lazy_string() {
+        let foo = || String::from("foo");
+        let lazy = super::LazyString::new(foo);
+        assert_eq!(String::from(lazy), "foo");
+    }
+
+    #[test]
     fn tuple_into_pos() {
         let pos = Pos { line: 4, col: 6 };
         assert_eq!(pos, Pos::from((4, 6)));
@@ -97,7 +108,7 @@ mod tests {
     fn pos_order() {
         // All we're doing here is checking that `Pos` will have the correct
         // ordering
-        
+
         let tab: Vec<((u32, u32), (u32, u32))> = vec![
             ((1, 1), (1, 3)),
             ((1, 2), (1, 2)),
@@ -112,7 +123,7 @@ mod tests {
             let pos1: Pos = (*p1).into();
             let pos2: Pos = (*p2).into();
 
-            assert_eq!(exp_left,  pos1.cmp(&pos2), "From iteration {}", i);
+            assert_eq!(exp_left, pos1.cmp(&pos2), "From iteration {}", i);
             assert_eq!(exp_right, pos2.cmp(&pos1), "From iteration {}", i);
         }
     }

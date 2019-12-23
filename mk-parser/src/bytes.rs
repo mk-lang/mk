@@ -1,5 +1,6 @@
 //! Byte manipulation for parsing UTF-8 text
 
+/// Errors from decoding UTF-8 byte sequences
 #[derive(Clone, Debug)]
 pub enum UTF8Error {
     /// This error will occur when a byte that is not valid in any UTF-8
@@ -139,13 +140,27 @@ fn is_continuation_byte(b: u8) -> bool {
     b & CONT_MASK == 0b1000_0000
 }
 
-#[inline(always)]
+/// Returns true if a byte is within the bounds bounds, inclusive
+///
+/// Literally just:
+/// ```no_run
+/// # let (b, lower, upper) = (0, 0, 0);
+/// # let _ = {
+/// b >= lower && b <= upper
+/// # };
+/// ```
 pub fn between_inc(b: u8, lower: u8, upper: u8) -> bool {
     b >= lower && b <= upper
 }
 
-// TODO: Document that this expects ascii, and will panic if it is not
-#[inline(always)]
+/// Checks whether the given byte is between the two characters (inclusive)
+///
+/// Note that this function expects both characters to be ASCII, and will panic
+/// if either is not. The standard library provides a function,
+/// [`char::is_ascii`] that can be used to validate input if it is not known at
+/// compile-time.
+///
+/// [`char::is_ascii`]: https://doc.rust-lang.org/std/primitive.char.html#method.is_ascii
 pub fn between_chars(b: u8, lower: char, upper: char) -> bool {
     // Hopefully the checking won't produce much overhead, as the bounds are
     // likely to be known at compile-time, and force-inlining should help with that.
@@ -206,11 +221,10 @@ pub fn in_range<R: std::ops::RangeBounds<u8>>(b: u8, range: R) -> bool {
 // which is not possible in utf-8. We're basing this on a chart from wikipedia:
 //   https://en.wikipedia.org/wiki/UTF-8#Codepage_layout
 //
-// We make it static (not const) as we are often inlining the functions that
-// require this, so it would add unecessary size to the final binary.
-//
-// TODO: A future crate feature could be producing a faster (but larger) binary
-// by instead letting this be a const array.
+// We make it static (not const) because it makes no difference in the runtime:
+// they both will require the same pointer arithmetic. The only difference is
+// in the size of the compiled binary, which will be larger if it is declared
+// as `const`.
 static UTF8_CHAR_WIDTH: [u8; 256] = [
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
