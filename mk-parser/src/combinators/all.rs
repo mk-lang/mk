@@ -15,36 +15,125 @@
 // As such, their documentation comments reflect that they are being used above
 #![doc(hidden)]
 
-use crate::{
-    utils::LazyString,
-    source::Source,
-    Parser, DynParser, ParseResult,
-};
+use crate::{source::Source, utils::LazyString, DynParser, ParseResult, Parser};
 
-use std::ops::{BitOr, Add};
+#[cfg(feature = "bnf-syntax")]
+use std::ops::{Add, BitOr};
 
-// TODO-DOC
-pub fn all<P, A>(into_all: A) -> P
-where
-    P: Parser + sealed::Sealed,
-    A: IntoAll<P>,
-{
+/// Constructs a parser that matches only when each given parser matches in
+/// succession.
+///
+/// [`IntoAll`] is implemented for n-tuples of parsers\* so that this function
+/// can be called in a similar fashion to the example below:
+///
+/// \* `IntoAll` is only implemented on n-tuples up to n=16.
+///
+/// # Examples
+///
+/// ```
+/// use mk_parser::{DynParser, Parser, source::Source};
+/// use mk_parser::basics::{StrLit, char_lit};
+/// use mk_parser::combinators::all;
+///
+/// let s = "foo☺bar";
+/// let mut src = Source::new(s.as_bytes());
+///
+/// // Note that this trivial example is intentionally convoluted in order to
+/// // demonstrate the flexibility of types allowed here.
+/// let psr = all((StrLit("foo"), char_lit('☺').map(|_| "☺"), StrLit("bar")));
+///
+/// assert_eq!(psr.parse(&mut src, false).unwrap().0, ("foo", "☺", "bar"));
+/// ```
+///
+/// [`IntoAll`]: trait.IntoAll.html
+pub fn all<A: IntoAll>(into_all: A) -> A::Output {
     into_all.into()
 }
 
-// TODO-DOC
-pub trait IntoAll<P>
-where
-    P: Parser + sealed::Sealed,
-{
-    fn into(self) -> P;
+/// A trait that is implemented on n-tuples of parsers, up to n=16
+///
+/// This is essentially a clone of [`IntoAny`].
+///
+/// Information about its usage can be found in the function [`all`]. The rest
+/// of the writing here is meant for people who like to abuse the crates they
+/// import.
+///
+/// It may be useful to know that `IntoAll` isn't implemented on singleton
+/// tuples (of the form `(P,)`) - it is instead implement for the types itself,
+/// thus it is implemented on every parser as well. Calling [`all`] with a
+/// single parser (which might be necessary if you're designing macros
+/// yourself) could be done like:
+/// ```no_run
+/// # use mk_parser::{combinators::all, basics::StrLit};
+/// # let _ = {
+/// all(StrLit("foo"))
+/// # };
+/// ```
+/// These details are thankfully likely not relevant to "typical" users of this
+/// crate.
+///
+/// [`IntoAny`]: trait.IntoAny.html
+/// [`all`]: fn.all.html
+pub trait IntoAll: sealed::Sealed {
+    type Output: Parser;
+
+    fn into(self) -> Self::Output;
 }
 
-pub(super) mod sealed {
+pub mod sealed {
     pub trait Sealed {}
+
+    macro_rules! impl_sealed {
+        ( $p:ident, $($ps:ident),+ ) => {
+            impl<$p, $($ps),+> Sealed for ($p, $($ps),+)
+            where
+                $p: $crate::Parser,
+                $($ps: $crate::Parser),+
+            {}
+
+            impl_sealed!( $($ps),+ );
+        };
+
+        ( $p:ident ) => {
+            impl<P: $crate::Parser> Sealed for P {}
+        }
+    }
+
+    impl_sealed! {
+        P16, P15, P14, P13, P12, P11, P10, P9,
+        P8,  P7,  P6,  P5,  P4,  P3,  P2,  P1
+    }
 }
 
-// TODO-DOC
+/// Parser combinator that matches on one parser followed by another
+///
+/// This parser is typically constructed with the parser method [`Parser::and`],
+/// but is also the resulting parser from calling [`all`] with two inputs.
+///
+/// The output type of this parser is a tuple where the first element is the
+/// output from the first parser's match and the second is the output from the
+/// second.
+///
+/// # Examples
+///
+/// ```
+/// use mk_parser::{DynParser, Parser, source::Source};
+/// use mk_parser::basics::StrLit;
+///
+/// let s = "foo-bar";
+/// let mut src = Source::new(s.as_bytes());
+///
+/// let psr = StrLit("foo").and(StrLit("-bar"));
+///
+/// assert_eq!(psr.parse(&mut src, false).unwrap().0, ("foo", "-bar"));
+/// ```
+///
+/// For matching many parsers in sequence, it is recommended to use [`all`] -
+/// or [`DynAll`] if that sequence is not known at compile-time.
+///
+/// [`Parser::and`]: trait.Parser.html#method.and
+/// [`all`]: fn.all.html
+/// [`DynAll`]: struct.DynAll.html
 pub struct Chain<P1, P2>
 where
     P1: Parser,
@@ -54,17 +143,9 @@ where
     pub(crate) second: P2,
 }
 
-impl<P1, P2> sealed::Sealed for Chain<P1, P2>
-where
-    P1: Parser,
-    P2: Parser,
-{}
+impl<P1: Parser, P2: Parser> IntoAll for (P1, P2) {
+    type Output = Chain<P1, P2>;
 
-impl<P1, P2> IntoAll<Chain<P1, P2>> for (P1, P2)
-where
-    P1: Parser,
-    P2: Parser,
-{
     fn into(self) -> Chain<P1, P2> {
         Chain {
             first: self.0,
@@ -73,62 +154,66 @@ where
     }
 }
 
-impl<P1, P2> DynParser for Chain<P1, P2>
-where
-    P1: Parser,
-    P2: Parser,
-{
+impl<P1: Parser, P2: Parser> DynParser for Chain<P1, P2> {
     type Output = (P1::Output, P2::Output);
-    
+
     fn parse(&self, src: &mut Source, msg_hint: bool) -> ParseResult<Self::Output> {
         let pos = src.pos();
 
         let first = match self.first.parse(src, msg_hint) {
             ParseResult::Error(e) => return ParseResult::Error(e),
-            ParseResult::Success(o,_) => o,
-            ParseResult::Fail(p,lvl,m) => {
+            ParseResult::Success(o, _) => o,
+            ParseResult::Fail(p, lvl, m) => {
                 let msg = if m.is_some() && (lvl != 0 || msg_hint) {
                     Some(LazyString::new(move || {
-                        format!("{} at {}:\n{}",
-                                "Failed to match first parser",
-                                p, String::from(m.unwrap()))
+                        format!(
+                            "{} at {}:\n{}",
+                            "Failed to match first parser",
+                            p,
+                            String::from(m.unwrap())
+                        )
                     }))
                 } else if msg_hint {
                     Some(LazyString::new(move || {
-                        format!("{} at {} without message",
-                                "Failed to match first parser",
-                                p)
+                        format!(
+                            "{} at {} without message",
+                            "Failed to match first parser", p
+                        )
                     }))
                 } else {
                     None
                 };
 
                 return ParseResult::Fail(pos, lvl, msg);
-            },
+            }
         };
 
         let second = match self.second.parse(src, msg_hint) {
             ParseResult::Error(e) => return ParseResult::Error(e),
-            ParseResult::Success(o,_) => o,
-            ParseResult::Fail(p,lvl,m) => {
+            ParseResult::Success(o, _) => o,
+            ParseResult::Fail(p, lvl, m) => {
                 let msg = if m.is_some() && (lvl != 0 || msg_hint) {
                     Some(LazyString::new(move || {
-                        format!("{} at {}:\n{}",
-                                "Failed to match second parser",
-                                p, String::from(m.unwrap()))
+                        format!(
+                            "{} at {}:\n{}",
+                            "Failed to match second parser",
+                            p,
+                            String::from(m.unwrap())
+                        )
                     }))
                 } else if msg_hint {
                     Some(LazyString::new(move || {
-                        format!("{} at {} without message",
-                                "Failed to match second parser",
-                                p)
+                        format!(
+                            "{} at {} without message",
+                            "Failed to match second parser", p
+                        )
                     }))
                 } else {
                     None
                 };
 
                 return ParseResult::Fail(pos, lvl, msg);
-            },
+            }
         };
 
         ParseResult::Success((first, second), pos)
@@ -139,8 +224,10 @@ impl<P1, P2> Parser for Chain<P1, P2>
 where
     P1: Parser,
     P2: Parser,
-{}
+{
+}
 
+#[cfg(feature = "bnf-syntax")]
 impl<P1, P2, P3> BitOr<P3> for Chain<P1, P2>
 where
     P1: Parser,
@@ -150,6 +237,7 @@ where
     impl_bitor!(P3);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<P1, P2, P3> Add<P3> for Chain<P1, P2>
 where
     P1: Parser,
@@ -172,14 +260,9 @@ macro_rules! special_impl_add {
         $p:ident, $($ps:ident),+ @
         $oid:ident, $idx:tt @ $($oids:ident, $idx_tail:tt)@+
     ) => {
-        impl<P, $p, $($ps),+> Add<P> for $all<$p, $($ps),+>
-        where
-            $p: Parser,
-            $($ps: Parser,)+
-            P: Parser<Output = <Self as DynParser>::Output>,
-        {
-            impl_add!(P);
-        }
+        // We don't want to implement it for the highest number, because that
+        // could lead to obscure errors if someone (for **SOME** reason) were
+        // to try to chain more than 16 parsers together.
     };
 
     (
@@ -188,6 +271,7 @@ macro_rules! special_impl_add {
         $p:ident, $($ps:ident),+ @
         $oid:ident, $idx:tt @ $($oids:ident, $idx_tail:tt)@+
     ) => {
+        #[cfg(feature = "bnf-syntax")]
         impl<P, $p, $($ps),+> Add<P> for $all<$p, $($ps),+>
         where
             $p: Parser,
@@ -220,26 +304,14 @@ macro_rules! impl_tup_all {
         $p:ident, $($ps:ident),+ @
         $oid:ident, $idx:tt @ $($oids:ident, $idx_tail:tt)@+
     ) => {
-        pub struct $all<$p, $($ps),+>
-        where
-            $p: Parser,
-            $($ps: Parser),+
-        {
+        pub struct $all<$p: Parser, $($ps: Parser),+> {
             inner: ($p, $($ps),+),
         }
 
-        impl<$p, $($ps),+> sealed::Sealed for $all<$p, $($ps),+>
-        where
-            $p: Parser,
-            $($ps: Parser),+
-        {}
+        impl<$p: Parser, $($ps: Parser),+> IntoAll for ($p,$($ps),+) {
+            type Output = $all<$p, $($ps),+>;
 
-        impl<$p, $($ps),+> IntoAll<$all<$p, $($ps),+>> for ($p,$($ps),+)
-        where
-            $p: Parser,
-            $($ps: Parser),+
-        {
-            fn into(self) -> $all<$p, $($ps),+> {
+            fn into(self) -> Self::Output {
                 $all {
                     inner: self,
                 }
@@ -317,6 +389,7 @@ macro_rules! impl_tup_all {
             $($ps: Parser),+
         {}
 
+        #[cfg(feature = "bnf-syntax")]
         impl<P, $p, $($ps),+> BitOr<P> for $all<$p, $($ps),+>
         where
             $p: Parser,
@@ -360,38 +433,52 @@ impl_tup_all! {
     o3,  3  @ o2,  2  @ o1,  1  @ o0,  0
 }
 
-pub struct Single<P: Parser> {
-    psr: P,
-}
+impl<P: Parser> IntoAll for P {
+    type Output = Self;
 
-impl<P: Parser> sealed::Sealed for Single<P> {}
-
-impl<P: Parser> IntoAll<Single<P>> for P {
-    fn into(self) -> Single<P> {
-        Single {
-            psr: self,
-        }
+    fn into(self) -> Self {
+        self
     }
 }
 
-impl<P: Parser> DynParser for Single<P> {
-    type Output = P::Output;
-
-    fn parse(&self, src: &mut Source, msg_hint: bool) -> ParseResult<P::Output> {
-        self.psr.parse(src, msg_hint)
-    }
-}
-
-impl<P: Parser> Parser for Single<P> {}
-
-
-// // TODO: Is there any reason we'd need this?
-// impl<P: Parser, P2: Parser<Output = P::Output>> BitOr<P2> for Single<P> {
-//     impl_bitor!(P2);
-// }
-
-// TODO-DOC
-pub struct DynAll<T>(pub Vec<Box<dyn DynParser<Output=T>>>);
+/// Parser that matches when an entire runtime sequence of parsers matches
+///
+/// Unlike the function [`all`], this parser allows the calculation of the
+/// sequence of parsers to be deferred until runtime. It *will* be slower than
+/// one computed at compile-time, so this type should be used exclusively for
+/// cases where the combinator **must** be built at runtime. For other uses,
+/// see [`all`].
+///
+/// # Examples
+///
+/// For this case, the types can't be computed at compile-time. If you need to,
+/// it should be simple enough to extend this idea to cases where the length of
+/// the sequence isn't known at compile-time either.
+/// ```
+/// use mk_parser::{
+///     Parser, DynParser,
+///     source::Source,
+///     basics::{StrLit, char_lit, StringLit},
+///     combinators::DynAll,
+/// };
+///
+/// fn gen_psr(i: i32) -> Box<dyn DynParser<Output = String>> {
+///     match i {
+///         0 => Box::new(StrLit("zero").map(String::from)),
+///         1 => Box::new(char_lit(' ').map(|_| String::from(" "))),
+///         _ => Box::new(StringLit(String::from("two")).name("Special number two!")),
+///     }
+/// }
+///
+/// let s = "zero two";
+/// let mut src = Source::new(s.as_bytes());
+///
+/// let psr = DynAll(vec![gen_psr(0), gen_psr(1), gen_psr(2)]);
+/// assert_eq!(psr.parse(&mut src, false).unwrap().0, &["zero", " ", "two"]);
+/// ```
+///
+/// [`all`]: fn.all.html
+pub struct DynAll<T>(pub Vec<Box<dyn DynParser<Output = T>>>);
 
 impl<T> DynParser for DynAll<T> {
     type Output = Vec<T>;
@@ -407,22 +494,27 @@ impl<T> DynParser for DynAll<T> {
                 ParseResult::Fail(p, lvl, m) => {
                     let msg = if m.is_some() && (lvl != 0 || msg_hint) {
                         Some(LazyString::new(move || {
-                            format!("{} #{} at {}:\n{}",
-                                    "Failed to match dyn parser",
-                                    i, p, String::from(m.unwrap()))
+                            format!(
+                                "{} #{} at {}:\n{}",
+                                "Failed to match dyn parser",
+                                i,
+                                p,
+                                String::from(m.unwrap())
+                            )
                         }))
                     } else if msg_hint {
                         Some(LazyString::new(move || {
-                            format!("{} #{} at {} without message",
-                                    "Failed to match dyn parser",
-                                    i, p)
+                            format!(
+                                "{} #{} at {} without message",
+                                "Failed to match dyn parser", i, p
+                            )
                         }))
                     } else {
                         None
                     };
 
                     return ParseResult::Fail(pos, lvl, msg);
-                },
+                }
             };
 
             outs.push(t);
@@ -434,21 +526,19 @@ impl<T> DynParser for DynAll<T> {
 
 impl<T> Parser for DynAll<T> {}
 
+#[cfg(feature = "bnf-syntax")]
 impl<T, P: Parser<Output = Vec<T>>> BitOr<P> for DynAll<T> {
     impl_bitor!(P);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<T, P: Parser<Output = Vec<T>>> Add<P> for DynAll<T> {
     impl_add!(P);
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        basics::StrLit,
-        source::Source,
-        DynParser, Parser,
-    };
+    use crate::{basics::StrLit, source::Source, DynParser, Parser};
 
     #[test]
     fn chain() {
@@ -471,9 +561,11 @@ mod tests {
         let s = "foobarbaz";
         let mut src = Source::new(s.as_bytes());
 
+        // The first couple few are simply checking that it compiles properly
+        let _psr = super::all(StrLit("foo"));
         let _psr = super::all((StrLit("foo"), StrLit("bar")));
-        let _psr = super::all((StrLit("foo"), StrLit("bar"), StrLit("baz")));
-        let psr = StrLit("foo") + StrLit("bar") + StrLit("baz");
+        let psr = super::all((StrLit("foo"), StrLit("bar"), StrLit("baz")));
+        // let psr = StrLit("foo") + StrLit("bar") + StrLit("baz");
         assert_eq!(
             psr.parse(&mut src, false).unwrap().0,
             ("foo".into(), "bar".into(), "baz".into())
@@ -488,10 +580,14 @@ mod tests {
         let mut src = Source::new(s.as_bytes());
 
         let psr = super::DynAll(vec![
-                                Box::new(StrLit("foo")),
-                                Box::new(StrLit("-bar")),
-                                Box::new(StrLit("-baz"))]);
-        
-        assert_eq!(psr.parse(&mut src, false).unwrap().0, ["foo", "-bar", "-baz"]);
+            Box::new(StrLit("foo")),
+            Box::new(StrLit("-bar")),
+            Box::new(StrLit("-baz")),
+        ]);
+
+        assert_eq!(
+            psr.parse(&mut src, false).unwrap().0,
+            ["foo", "-bar", "-baz"]
+        );
     }
 }

@@ -7,19 +7,16 @@
 //! provided for each type.
 
 mod any;
-pub use any::{IntoAny, Either, any, DynAny};
+pub use any::{any, DynAny, Either, IntoAny};
 mod all;
-pub use all::{IntoAll, Chain, all, DynAll};
+pub use all::{all, Chain, DynAll, IntoAll};
 
-use crate::{
-    utils::LazyString,
-    source::Source,
-    DynParser, ParseResult, Parser,
-};
+use crate::{source::Source, utils::LazyString, DynParser, ParseResult, Parser};
 
-use std::ops::{BitOr, Add};
+#[cfg(feature = "bnf-syntax")]
+use std::ops::{Add, BitOr};
 
-/// Parser that wraps the output of another parser with a function 
+/// Parser that wraps the output of another parser with a function
 ///
 /// This parser is constructed with the [`map`] method provided by the
 /// `Parser` trait.
@@ -71,8 +68,10 @@ impl<P, F, T> Parser for Map<P, F, T>
 where
     P: Parser,
     F: 'static + Fn(P::Output) -> T,
-{}
+{
+}
 
+#[cfg(feature = "bnf-syntax")]
 impl<P, F, T, P2> BitOr<P2> for Map<P, F, T>
 where
     P: Parser,
@@ -82,6 +81,7 @@ where
     impl_bitor!(P2);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<P, F, T, P2> Add<P2> for Map<P, F, T>
 where
     P: Parser,
@@ -295,10 +295,12 @@ where
 
 impl<P: Parser> Parser for Repeat<P> {}
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser, P2: Parser<Output = Vec<P::Output>>> BitOr<P2> for Repeat<P> {
     impl_bitor!(P2);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser, P2: Parser<Output = Vec<P::Output>>> Add<P2> for Repeat<P> {
     impl_add!(P2);
 }

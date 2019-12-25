@@ -1,14 +1,19 @@
 // TODO-DOC: Add more here: examples and general descriptions
+// TODO-DOC: Add a note about bnf-syntax feature
 //! The utilities for creating, defining, and using parsers
 
 // Personal preference - It often aligns better, and can be more
 // concise than a typical "if" statement.
 #![allow(clippy::match_bool)]
-
 // Set a url for allowing "run" buttons on our doc examples
 // TODO: This won't work until we release the crate
 #![doc(html_playground_url = "https://play.rust-lang.org/")]
 
+// General TODO: Reduce repeated code in failure messages to use macro(s)
+// General TODO: Audit doc examples to use the same ordering of imports
+// --> Maybe we include a prelude?
+
+#[cfg(feature = "bnf-syntax")]
 #[macro_use]
 mod macros;
 
@@ -26,7 +31,7 @@ use self::{
     utils::{LazyString, Pos},
 };
 
-use combinators::{Map, Repeat, Either, Chain};
+use combinators::{Chain, Either, Map, Repeat};
 use handlers::{FailLevel, Named};
 
 /// Indicates the outcome of a parsing attempt.
@@ -51,15 +56,27 @@ pub enum ParseResult<T> {
     /// returned - even though this may sometimes be immediately obvious from
     /// context.
     ///
-    /// Lastly, the `i64` in the tuple provides the number of nested parsers to
-    /// break out of. Some combinators (like `Map`) will simply pass the value,
-    /// whereas others (like `Either`) will decrement it, or perform other
-    /// operations therein. Typically, a value of 0 indicates a "normal" fail,
-    /// values greater than zero cause finitely many nested parsers to fail,
-    /// and values less than zero will fail all the way down the stack.
+    /// # Failure level
+    ///
+    /// The `i64` in the tuple provides the failure level, which is
+    /// symbolically the number of nested parsers to break out of. Some
+    /// combinators (like [`Map`]) will simply pass the value, whereas others
+    /// (like [`Either`]) will decrement it.
+    /// Typically, a value of 0 indicates a "normal" fail, values greater than
+    /// zero cause finitely many nested parsers to fail, and values less than
+    /// zero will fail all the way down the stack of parsers.
+    ///
+    /// For setting the failure level, see [`Parser::expect`],
+    /// [`Parser::require`], and [`Handlers::FailLevel`].
     ///
     /// [`msg_hint`]: trait.Parser.html#tymethod.parse
     /// [`Parser`]: trait.Parser.html
+    /// [`Map`]: combinators/struct.Map.html
+    /// [`Either`]: combinators/struct.Either.html
+    /// [`Parser::expect`]: trait.Parser.html#method.expect
+    /// [`Parser::require`]: trait.Parser.html#method.require
+    /// [`Handlers::FailLevel`]: handlers/struct.FailLevel.html
+    // TODO: Improve the explanation of failure level
     Fail(Pos, i64, Option<LazyString>),
 
     /// `Error` indicates that a fatal error has occured while parsing and that
@@ -189,7 +206,6 @@ pub trait DynParser {
 ///
 /// [`DynParser`]: trait.DynParser.html
 pub trait Parser: DynParser + Sized {
-
     /// Shorthand for constructing [`combinators::Map`]
     ///
     /// `Map` will apply `f` to to the output of this parser.
@@ -199,10 +215,7 @@ pub trait Parser: DynParser + Sized {
     where
         F: 'static + Fn(Self::Output) -> T,
     {
-        combinators::Map {
-            psr: self,
-            func: f,
-        }
+        combinators::Map { psr: self, func: f }
     }
 
     /// Shorthand for constructing [`combinators::Repeat`]
@@ -224,7 +237,16 @@ pub trait Parser: DynParser + Sized {
         }
     }
 
-    // TODO-DOC
+    /// Shorthand for constructing [`combinators::Either`]
+    ///
+    /// `Either` will match on inputs where either the first or the second
+    /// match - preferring the first. `Parser::or` will likewise attempt to
+    /// match `self` over its argument.
+    ///
+    /// For more information, see [`Either`].
+    ///
+    /// [`combinators::Either`]: combinators/struct.Either.html
+    /// [`Either`]: combinators/struct.Either.html
     fn or<P>(self, other: P) -> Either<Self, P>
     where
         P: Parser<Output = Self::Output>,
@@ -235,7 +257,15 @@ pub trait Parser: DynParser + Sized {
         }
     }
 
-    // TODO-DOC
+    /// Shorthand for constructing [`combinators::Chain`]
+    ///
+    /// `Chain` will create a parser which matches only on a match of the
+    /// first, followed by the second.
+    ///
+    /// For more information, see [`Chain`].
+    ///
+    /// [`combinators::Chain`]: combinators/struct.Chain.html
+    /// [`Chain`]: combinators/struct.Chain.html
     fn and<P>(self, other: P) -> Chain<Self, P>
     where
         P: Parser,
@@ -246,22 +276,52 @@ pub trait Parser: DynParser + Sized {
         }
     }
 
-    /// An alias for [`handlers::named`]
+    /// Shorthand for constructing [`handlers::Named`]
     ///
-    /// [`handlers::named`]: handlers/fn.named.html
-    // TODO-DOC: Add example(s)
+    /// Names the parser so that failure messages can include some unique,
+    /// helpful information.
+    ///
+    /// For more information, see [`Named`].
+    ///
+    /// [`handlers::Named`]: handlers/struct.Named.html
+    /// [`Named`]: handlers/struct.Named.html
     fn name<S: Into<String>>(self, name: S) -> Named<Self> {
-        handlers::named(self, name.into())
+        handlers::Named {
+            psr: self,
+            name: name.into(),
+        }
     }
 
-    // TODO-DOC
+    /// Modifies the failure level of the parser so that containing parsers will
+    /// fail if it is not met
+    ///
+    /// The "level" value returned with any failure will be modified so that it
+    /// will always increase the level value to one (if it is already greater,
+    /// that is preserved).
+    ///
+    /// For more information, see [`handlers::FailLevel`], the associated
+    /// function [`fail_level`], and general failure information in
+    /// [`ParseResult::Fail`].
+    ///
+    /// [`handlers::FailLevel`]: handlers/struct.FailLevel.html
+    /// [`fail_level`]: handlers/fn.fail_level.html
+    /// [`ParseResult::Fail`]: enum.ParseResult.html#variant.Fail
     fn expect(self) -> FailLevel<Self, fn(i64) -> i64> {
-        handlers::fail_level(self, |_| 1_i64)
+        handlers::fail_level(self, |l| if l == 0 { 1_i64 } else { l })
     }
 
-    // TODO-DOC
+    /// Modifies the parser to cause a fail at every level if not matched
+    ///
+    /// Internally, this sets the "level" of the failure to -1.
+    ///
+    /// For more information, see [`handlers::FailLevel`], the associated
+    /// function [`fail_level`], and general failure information in
+    /// [`ParseResult::Fail`].
+    ///
+    /// [`handlers::FailLevel`]: handlers/struct.FailLevel.html
+    /// [`fail_level`]: handlers/fn.fail_level.html
+    /// [`ParseResult::Fail`]: enum.ParseResult.html#variant.Fail
     fn require(self) -> FailLevel<Self, fn(i64) -> i64> {
         handlers::fail_level(self, |_| -1_i64)
     }
 }
-

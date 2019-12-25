@@ -16,32 +16,128 @@
 #![doc(hidden)]
 
 use crate::{
-    utils::{LazyString, Pos},
     source::Source,
-    Parser, DynParser, ParseResult,
+    utils::{LazyString, Pos},
+    DynParser, ParseResult, Parser,
 };
 
-use std::ops::{BitOr, Add};
+#[cfg(feature = "bnf-syntax")]
+use std::ops::{Add, BitOr};
 
-// TODO-DOC
-pub fn any<P, A>(into_any: A) -> P
-where
-    P: Parser + sealed::Sealed,
-    A: IntoAny<P>,
-{
+/// Constructs a parser that matches when any of the given parsers match
+///
+/// [`IntoAny`] is implemented for n-tuples of parsers\* so that this function
+/// can be called in a similar fashion to the example below:
+///
+/// \* `IntoAny` is only implemented on n-tuples up to n=16.
+///
+/// # Examples
+///
+/// ```
+/// use mk_parser::{DynParser, Parser, source::Source};
+/// use mk_parser::basics::{StrLit, char_lit};
+/// use mk_parser::combinators::any;
+///
+/// let s = "foo☺bar";
+/// let mut src = Source::new(s.as_bytes());
+///
+/// // Note that this trivial example is intentionally convoluted in order to
+/// // demonstrate the flexibility of types allowed here.
+/// let psr = any((StrLit("foo"), char_lit('☺').map(|_| "☺"), StrLit("bar")));
+///
+/// assert_eq!(psr.parse(&mut src, false).unwrap().0, "foo");
+/// assert_eq!(psr.parse(&mut src, false).unwrap().0, "☺");
+/// assert_eq!(psr.parse(&mut src, false).unwrap().0, "bar");
+/// ```
+///
+/// [`IntoAny`]: trait.IntoAny.html
+pub fn any<A: IntoAny>(into_any: A) -> A::Output {
     into_any.into()
 }
 
-// TODO-DOC
-pub trait IntoAny<P: Parser> {
-    fn into(self) -> P;
+/// A trait that is implemented on n-tuples of parsers, up to n=16
+///
+/// This is essentially a clone of [`IntoAll`].
+///
+/// Information about its usage can be found in the function [`any`]. The rest
+/// of the writing here is meant for people who like to abuse the crates they
+/// import.
+///
+/// It may be useful to know that `IntoAny` isn't implemented on singleton
+/// tuples (of the form `(P,)`) - it is instead implement for the types itself,
+/// thus it is implemented on every parser as well. Calling [`any`] with a
+/// single parser (which might be necessary if you're designing macros
+/// yourself) could be done like:
+/// ```no_run
+/// # use mk_parser::{combinators::any, basics::StrLit};
+/// # let _ = {
+/// any(StrLit("foo"))
+/// # };
+/// ```
+/// These details are thankfully likely not relevant to "typical" users of this
+/// crate.
+///
+/// [`IntoAll`]: trait.IntoAll.html
+/// [`any`]: fn.any.html
+pub trait IntoAny: sealed::Sealed {
+    type Output: Parser;
+
+    fn into(self) -> Self::Output;
 }
 
 pub mod sealed {
     pub trait Sealed {}
+
+    macro_rules! impl_sealed {
+        ( $p:ident, $($ps:ident),+ ) => {
+            impl<$p, $($ps),+> Sealed for ($p, $($ps),+)
+            where
+                $p: $crate::Parser,
+                $($ps: $crate::Parser),+
+            {}
+
+            impl_sealed!( $($ps),+ );
+        };
+
+        ( $p:ident ) => {
+            impl<P: $crate::Parser> Sealed for P {}
+        }
+    }
+
+    impl_sealed! {
+        P16, P15, P14, P13, P12, P11, P10, P9,
+        P8,  P7,  P6,  P5,  P4,  P3,  P2,  P1
+    }
 }
 
-// TODO-DOC
+/// Parser combinator that matches on either one parser or the other
+///
+/// This parser is typically constructed with the parser method [`Parser::or`],
+/// but is also the resulting parser from calling [`any`] with two inputs.
+///
+/// Both of the parsers must have the same output type.
+///
+/// # Examples
+///
+/// ```
+/// use mk_parser::{DynParser, Parser, source::Source};
+/// use mk_parser::basics::StrLit;
+///
+/// let s = "foo-bar";
+/// let mut src = Source::new(s.as_bytes());
+///
+/// let psr = StrLit("foo").or(StrLit("-bar"));
+///
+/// assert_eq!(psr.parse(&mut src, false).unwrap().0, "foo");
+/// assert_eq!(psr.parse(&mut src, false).unwrap().0, "-bar");
+/// ```
+///
+/// For matching any one of a larger set of parsers, it is recommended to use
+/// [`any`] - or [`DynAny`] if that set is not known at compile-time.
+///
+/// [`Parser::or`]: trait.Parser.html#method.or
+/// [`any`]: fn.any.html
+/// [`DynAny`]: struct.DynAny.html
 pub struct Either<P1, P2>
 where
     P1: Parser,
@@ -51,17 +147,13 @@ where
     pub(crate) right: P2,
 }
 
-impl<P1, P2> sealed::Sealed for Either<P1, P2>
+impl<P1, P2> IntoAny for (P1, P2)
 where
     P1: Parser,
-    P2: Parser<Output = P1::Output>
-{}
-
-impl<P1, P2> IntoAny<Either<P1, P2>> for (P1, P2)
-where
-    P1: Parser,
-    P2: Parser<Output = P1::Output>
+    P2: Parser<Output = P1::Output>,
 {
+    type Output = Either<P1, P2>;
+
     fn into(self) -> Either<P1, P2> {
         Either {
             left: self.0,
@@ -169,8 +261,10 @@ impl<P1, P2> Parser for Either<P1, P2>
 where
     P1: Parser,
     P2: Parser<Output = P1::Output>,
-{}
+{
+}
 
+#[cfg(feature = "bnf-syntax")]
 impl<P1, P2, P3> BitOr<P3> for Either<P1, P2>
 where
     P1: Parser,
@@ -181,12 +275,12 @@ where
 
     fn bitor(self, rhs: P3) -> Any3<P1, P2, P3> {
         Any3 {
-            inner: (self.left, self.right, rhs)
+            inner: (self.left, self.right, rhs),
         }
     }
 }
 
-
+#[cfg(feature = "bnf-syntax")]
 impl<P1, P2, P3> Add<P3> for Either<P1, P2>
 where
     P1: Parser,
@@ -203,6 +297,7 @@ macro_rules! special_impl_bitor {
         $p:ident, $($ps:ident),+ @
         $idx:tt @ $($idx_tail:tt)@+
     ) => {
+        #[cfg(feature = "bnf-syntax")]
         impl<P, $p, $($ps),+> BitOr<P> for $any<$p, $($ps),+>
         where
             $p: Parser,
@@ -219,6 +314,7 @@ macro_rules! special_impl_bitor {
         $p:ident, $($ps:ident),+ @
         $idx:tt @ $($idx_tail:tt)@+
     ) => {
+        #[cfg(feature = "bnf-syntax")]
         impl<P, $p, $($ps),+> BitOr<P> for $any<$p, $($ps),+>
         where
             $p: Parser,
@@ -238,8 +334,8 @@ macro_rules! special_impl_bitor {
 }
 
 macro_rules! impl_tup_any {
-    // We already have implementations for one and two - `Single` and `Either`,
-    // so we don't need to recurse any further
+    // We already have implementations for one and two, so we don't need to
+    // recurse any further
     (
         $TOP:ident:
         $any:ident, $any_tail:ident @
@@ -263,18 +359,14 @@ macro_rules! impl_tup_any {
             inner: ($p, $($ps),+),
         }
 
-        impl<$p, $($ps),+> sealed::Sealed for $any<$p, $($ps),+>
-        where
-            $p: Parser,
-            $($ps: Parser<Output=$p::Output>),+
-        {}
-
-        impl<$p, $($ps),+> IntoAny<$any<$p, $($ps),+>> for ($p, $($ps),+)
+        impl<$p, $($ps),+> IntoAny for ($p, $($ps),+)
         where
             $p: Parser,
             $($ps: Parser<Output=$p::Output>,)+
         {
-            fn into(self) -> $any<$p, $($ps),+> {
+            type Output = $any<$p, $($ps),+>;
+
+            fn into(self) -> Self::Output {
                 $any {
                     inner: self,
                 }
@@ -406,6 +498,7 @@ macro_rules! impl_tup_any {
             $idx @ $($idx_tail)@+
         }
 
+        #[cfg(feature = "bnf-syntax")]
         impl<P, $p, $($ps),+> Add<P> for $any<$p, $($ps),+>
         where
             $p: Parser,
@@ -428,7 +521,7 @@ impl_tup_any! {
     Top:
 
     Any_Padding,
-    Any16, Any15, Any14, Any13, Any12, Any11, Any10, Any9, 
+    Any16, Any15, Any14, Any13, Any12, Any11, Any10, Any9,
     Any8,  Any7,  Any6,  Any5,  Any4,  Any3,
     Any_Padding  @
 
@@ -439,72 +532,61 @@ impl_tup_any! {
     7  @ 6  @ 5  @ 4  @ 3  @ 2  @ 1  @ 0
 }
 
-pub struct Single<P: Parser> {
-    psr: P,
-}
+impl<P: Parser> IntoAny for P {
+    type Output = Self;
 
-impl<P: Parser> sealed::Sealed for Single<P> {}
-
-impl<P: Parser> IntoAny<Single<P>> for P {
-    fn into(self) -> Single<P> {
-        Single {
-            psr: self,
-        }
+    fn into(self) -> Self {
+        self
     }
 }
 
-impl<P: Parser> DynParser for Single<P> {
-    type Output = P::Output;
-
-    fn parse(&self, src: &mut Source, msg_hint: bool) -> ParseResult<P::Output> {
-        self.psr.parse(src, msg_hint)
-    }
-}
-
-impl<P: Parser> Parser for Single<P> {}
-
-// // TODO: Is there any reason we'd need this?
-// impl<P1: Parser, P2: Parser<Output = P1::Output>> BitOr<P2> for Single<P1> {
-//     type Output = Either<P1, P2>;
-// 
-//     fn bitor(self, rhs: P2) -> Either<P1, P2> {
-//         Either {
-//             left: self.psr,
-//             right: rhs,
-//         }
-//     }
-// }
-
-// // TODO: Is there any reason we'd need this?
-// impl<P1: Parser, P2: Parser<Output = P1::Output>> Add<P2> for Single<P1> {
-//     type Output = Chain<P1, P2>;
-// 
-//     fn add(self, rhs: P2) -> Chain<P1, P2> {
-//         Chain {
-//             first: self.psr,
-//             second: rhs,
-//         }
-//     }
-// }
-
-// TODO-DOC
-// TODO: Change this to a tuple struct with public field
-pub struct DynAny<T> {
-    inner: Vec<Box<dyn DynParser<Output = T>>>,
-}
-
-impl<T> DynAny<T> {
-    // TODO-DOC
-    pub fn new(v: Vec<Box<dyn DynParser<Output = T>>>) -> Self {
-        DynAny { inner: v }
-    }
-}
+/// Parser that matches any of a runtime list of parsers
+///
+/// Unlike the function [`any`], this parser allows the computation of the
+/// sequence of parsers to be deferred until runtime. It *will* be slower than
+/// anything computed at compile-time, so this type should be used exclusively
+/// for cases where it cannot be avoided. For other scenarios, see [`any`].
+///
+/// [`any`]: fn.any.html
+///
+/// # Examples
+///
+/// For this case, the types can't be computed at compile-time. If you need to,
+/// it should be simple enough to extend this idea to cases where the length of
+/// the sequence isn't known at compile-time either.
+/// ```
+/// use mk_parser::{
+///     Parser, DynParser,
+///     source::Source,
+///     basics::{StrLit, char_lit, StringLit},
+///     combinators::DynAny,
+/// };
+///
+/// fn gen_psr(i: i32) -> Box<dyn DynParser<Output = String>> {
+///     match i {
+///         0 => Box::new(StrLit("zero").map(String::from)),
+///         1 => Box::new(char_lit(' ').map(|_| String::from(" "))),
+///         _ => Box::new(StringLit(String::from("two")).name("Special number two!")),
+///     }
+/// }
+///
+/// let s = "zero two";
+/// let mut src = Source::new(s.as_bytes());
+///
+/// let psr = DynAny(vec![gen_psr(0), gen_psr(1), gen_psr(2)]);
+/// assert_eq!(psr.parse(&mut src, false).unwrap().0, "zero");
+/// assert_eq!(psr.parse(&mut src, false).unwrap().0, " ");
+/// assert_eq!(psr.parse(&mut src, false).unwrap().0, "two");
+/// ```
+///
+/// [`any`]: fn.any.html
+pub struct DynAny<T>(pub Vec<Box<dyn DynParser<Output = T>>>);
 
 impl<T> DynParser for DynAny<T> {
     type Output = T;
 
     fn parse(&self, src: &mut Source, msg_hint: bool) -> ParseResult<T> {
-        if self.inner.is_empty() {
+        if self.0.is_empty() {
             let msg = if msg_hint {
                 Some(LazyString::new(|| {
                     String::from("`DynAny` has no parsers, cannot match")
@@ -516,28 +598,38 @@ impl<T> DynParser for DynAny<T> {
             return ParseResult::Fail(src.pos(), 0, msg);
         }
 
-        if self.inner.len() != 1 {
-            src.mark_backtrack();
-        }
+        // We could choose to not mark if len == 1, but this is simpler and the
+        // cost of marking is effectively zero.
+        src.mark_backtrack();
+        let mut is_marked = true;
 
         let pos = src.pos();
 
-        let mut poss: Vec<Pos> = Vec::with_capacity(self.inner.len());
-        let mut msgs: Vec<Option<LazyString>> = Vec::with_capacity(self.inner.len());
+        let mut poss: Vec<Pos> = Vec::with_capacity(self.0.len());
+        let mut msgs: Vec<Option<LazyString>> = Vec::with_capacity(self.0.len());
 
-        for (idx, psr) in self.inner.iter().enumerate() {
-            if idx != 0 {
-                // This only occurs if self.len() != 1
+        for (idx, psr) in self.0.iter().enumerate() {
+            // We could check if idx == 0 instead, but this is more clear
+            if is_marked {
                 src.backtrack();
             }
 
-            if idx == self.inner.len() - 1 && self.inner.len() != 1 {
+            // Minor optimization: Don't store for backtracking on the last
+            // iteration of the loop.
+            if idx == self.0.len() - 1 && is_marked {
                 src.unmark_backtrack();
+                is_marked = false;
             }
 
             let (p, m) = match psr.parse(src, msg_hint) {
                 ParseResult::Error(e) => return ParseResult::Error(e),
-                ParseResult::Success(t, _) => return ParseResult::Success(t, pos),
+                ParseResult::Success(t, _) => {
+                    if is_marked {
+                        src.unmark_backtrack();
+                    }
+
+                    return ParseResult::Success(t, pos)
+                },
                 ParseResult::Fail(p, 0, m) => (p, m),
                 ParseResult::Fail(p, i, m) => {
                     let msg = if let Some(m) = m {
@@ -560,6 +652,10 @@ impl<T> DynParser for DynAny<T> {
                     } else {
                         None
                     };
+
+                    if is_marked {
+                        src.unmark_backtrack()
+                    }
 
                     return ParseResult::Fail(p, i - 1, msg);
                 }
@@ -596,21 +692,19 @@ impl<T> DynParser for DynAny<T> {
 
 impl<T> Parser for DynAny<T> {}
 
+#[cfg(feature = "bnf-syntax")]
 impl<T, P: Parser<Output = T>> BitOr<P> for DynAny<T> {
     impl_bitor!(P);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<T, P: Parser<Output = T>> Add<P> for DynAny<T> {
     impl_add!(P);
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        basics::StrLit,
-        source::Source,
-        DynParser, Parser,
-    };
+    use crate::{basics::StrLit, source::Source, DynParser, Parser};
 
     #[test]
     fn either() {
@@ -635,19 +729,14 @@ mod tests {
         let s = "foobarbaz";
         let mut src = Source::new(s.as_bytes());
 
-        let psr = StrLit("foo")
-                | StrLit("bar")
-                | StrLit("baz")
-                | StrLit("foobar");
+        // let psr = StrLit("foo") | StrLit("bar") | StrLit("baz") | StrLit("foobar");
 
-        /*
         let psr = super::any((
             StrLit("foo"),
             StrLit("bar"),
             StrLit("baz"),
             StrLit("foobar"),
         ));
-        */
 
         assert_eq!(psr.parse(&mut src, false).unwrap().0, "foo");
         assert_eq!(psr.parse(&mut src, false).unwrap().0, "bar");
@@ -664,7 +753,7 @@ mod tests {
         let s = "foobarbaz";
         let mut src = Source::new(s.as_bytes());
 
-        let psr = super::DynAny::new(vec![
+        let psr = super::DynAny(vec![
             Box::new(StrLit("foo")),
             Box::new(StrLit("bar")),
             Box::new(StrLit("baz")),

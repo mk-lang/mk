@@ -12,16 +12,16 @@
 
 use crate::{
     bytes,
-    fundamentals::{ByteSeq, ByteLit},
+    fundamentals::{ByteLit, ByteSeq},
     source::{ReadMany, ReadSingle, Source},
     utils::LazyString,
     DynParser, ParseResult, Parser,
 };
 
-use std::{
-    convert::{TryInto, TryFrom},
-    ops::{BitOr, Add}
-};
+use std::convert::{TryFrom, TryInto};
+
+#[cfg(feature = "bnf-syntax")]
+use std::ops::{Add, BitOr};
 
 /// Parser that matches on a literal string
 ///
@@ -89,10 +89,12 @@ impl DynParser for StringLit {
 
 impl Parser for StringLit {}
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = String>> BitOr<P> for StringLit {
     impl_bitor!(P);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = String>> Add<P> for StringLit {
     impl_add!(P);
 }
@@ -156,10 +158,12 @@ impl DynParser for StrLit {
 
 impl Parser for StrLit {}
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = &'static str>> BitOr<P> for StrLit {
     impl_bitor!(P);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = &'static str>> Add<P> for StrLit {
     impl_add!(P);
 }
@@ -222,51 +226,47 @@ impl DynParser for CharLit {
 
     fn parse(&self, src: &mut Source, msg_hint: bool) -> ParseResult<char> {
         match &self.0 {
-            &CharLitInner::Ascii(b) => {
-                match ByteLit(b).parse(src, msg_hint) {
-                    ParseResult::Error(e) => ParseResult::Error(e),
-                    ParseResult::Success(_, p) => ParseResult::Success(b as char, p),
-                    ParseResult::Fail(p, _, s) => {
-                        if !msg_hint {
-                            ParseResult::Fail(p, 0, None)
-                        } else {
-                            ParseResult::Fail(
-                                p,
-                                0,
-                                Some(LazyString::new(move || {
-                                    format!(
-                                        "Failed to find character '{}':\n{}",
-                                        b as char,
-                                        String::from(s.unwrap())
-                                    )
-                                })),
-                            )
-                        }
-                    },
+            &CharLitInner::Ascii(b) => match ByteLit(b).parse(src, msg_hint) {
+                ParseResult::Error(e) => ParseResult::Error(e),
+                ParseResult::Success(_, p) => ParseResult::Success(b as char, p),
+                ParseResult::Fail(p, _, s) => {
+                    if !msg_hint {
+                        ParseResult::Fail(p, 0, None)
+                    } else {
+                        ParseResult::Fail(
+                            p,
+                            0,
+                            Some(LazyString::new(move || {
+                                format!(
+                                    "Failed to find character '{}':\n{}",
+                                    b as char,
+                                    String::from(s.unwrap())
+                                )
+                            })),
+                        )
+                    }
                 }
             },
-            CharLitInner::NonAscii(lit, psr) => {
-                match psr.parse(src, msg_hint) {
-                    ParseResult::Error(e) => ParseResult::Error(e),
-                    ParseResult::Success(_, p) => ParseResult::Success(*lit, p),
-                    ParseResult::Fail(p, _, s) => {
-                        if !msg_hint {
-                            ParseResult::Fail(p, 0, None)
-                        } else {
-                            let lit = *lit;
-                            ParseResult::Fail(
-                                p,
-                                0,
-                                Some(LazyString::new(move || {
-                                    format!(
-                                        "Failed to find character '{}':\n{}",
-                                        lit,
-                                        String::from(s.unwrap())
-                                        )
-                                })),
-                            )
-                        }
-                    },
+            CharLitInner::NonAscii(lit, psr) => match psr.parse(src, msg_hint) {
+                ParseResult::Error(e) => ParseResult::Error(e),
+                ParseResult::Success(_, p) => ParseResult::Success(*lit, p),
+                ParseResult::Fail(p, _, s) => {
+                    if !msg_hint {
+                        ParseResult::Fail(p, 0, None)
+                    } else {
+                        let lit = *lit;
+                        ParseResult::Fail(
+                            p,
+                            0,
+                            Some(LazyString::new(move || {
+                                format!(
+                                    "Failed to find character '{}':\n{}",
+                                    lit,
+                                    String::from(s.unwrap())
+                                )
+                            })),
+                        )
+                    }
                 }
             },
         }
@@ -275,10 +275,12 @@ impl DynParser for CharLit {
 
 impl Parser for CharLit {}
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = char>> BitOr<P> for CharLit {
     impl_bitor!(P);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = char>> Add<P> for CharLit {
     impl_add!(P);
 }
@@ -439,10 +441,12 @@ impl DynParser for CharRange {
 
 impl Parser for CharRange {}
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = char>> BitOr<P> for CharRange {
     impl_bitor!(P);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = char>> Add<P> for CharRange {
     impl_add!(P);
 }
@@ -455,24 +459,24 @@ mod tests {
     fn string_lit() {
         let s = String::from("foo bar string");
         let mut src = Source::new(s.as_bytes());
-        assert!(super::StringLit(String::from("foo")).parse(&mut src, false)
-                .is_success());
-        assert!(super::StringLit(String::from("abcde")).parse(&mut src, false)
-                .is_fail());
-        assert!(super::StringLit(String::from("string")).parse(&mut src, false)
-                .is_success());
+        assert!(super::StringLit(String::from("foo"))
+            .parse(&mut src, false)
+            .is_success());
+        assert!(super::StringLit(String::from("abcde"))
+            .parse(&mut src, false)
+            .is_fail());
+        assert!(super::StringLit(String::from("string"))
+            .parse(&mut src, false)
+            .is_success());
     }
 
     #[test]
     fn str_lit() {
         let s = String::from("foo bar string");
         let mut src = Source::new(s.as_bytes());
-        assert!(super::StrLit("foo").parse(&mut src, false)
-                .is_success());
-        assert!(super::StrLit("abcde").parse(&mut src, false)
-                .is_fail());
-        assert!(super::StrLit("string").parse(&mut src, false)
-                .is_success());
+        assert!(super::StrLit("foo").parse(&mut src, false).is_success());
+        assert!(super::StrLit("abcde").parse(&mut src, false).is_fail());
+        assert!(super::StrLit("string").parse(&mut src, false).is_success());
     }
 
     #[test]

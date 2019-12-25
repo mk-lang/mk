@@ -59,7 +59,7 @@ pub enum ReadMany {
     /// available to read, giving the position of the start of the would-be
     /// sequence.
     EOF(Pos),
-    
+
     /// Represents an error that occured while reading
     Error(std::io::Error),
 }
@@ -96,7 +96,7 @@ impl ReadSingle {
 
     pub fn unwrap_err(self) -> std::io::Error {
         match self {
-            ReadSingle::Byte(_,_) => panic!("Called `ReadSingle::unwrap_err()` on a `Byte` value"),
+            ReadSingle::Byte(_, _) => panic!("Called `ReadSingle::unwrap_err()` on a `Byte` value"),
             ReadSingle::EOF(_) => panic!("Called `ReadSingle::unwrap_err()` on an `EOF` value"),
             ReadSingle::Error(e) => e,
         }
@@ -106,7 +106,9 @@ impl ReadSingle {
         match self {
             ReadSingle::Byte(_, p) => *p,
             ReadSingle::EOF(p) => *p,
-            ReadSingle::Error(_) => panic!("Called `ReadSingle::pos()` on an `Error` value, which has none"),
+            ReadSingle::Error(_) => {
+                panic!("Called `ReadSingle::pos()` on an `Error` value, which has none")
+            }
         }
     }
 }
@@ -143,7 +145,7 @@ impl ReadMany {
 
     pub fn unwrap_err(self) -> std::io::Error {
         match self {
-            ReadMany::Bytes(_,_) => panic!("Called `ReadMany::unwrap_err()` on a `Bytes` value"),
+            ReadMany::Bytes(_, _) => panic!("Called `ReadMany::unwrap_err()` on a `Bytes` value"),
             ReadMany::EOF(_) => panic!("Called `ReadMany::unwrap_err()` on an `EOF` value"),
             ReadMany::Error(e) => e,
         }
@@ -153,7 +155,9 @@ impl ReadMany {
         match self {
             ReadMany::Bytes(_, p) => *p,
             ReadMany::EOF(p) => *p,
-            ReadMany::Error(_) => panic!("Called `ReadMany::pos()` on an `Error` value, which has none"),
+            ReadMany::Error(_) => {
+                panic!("Called `ReadMany::pos()` on an `Error` value, which has none")
+            }
         }
     }
 }
@@ -414,7 +418,7 @@ impl<'a> Source<'a> {
         let start_pos = self.pos();
 
         loop {
-            if self.empty {
+            if self.empty && !self.is_backtracked() {
                 return match fail_eof {
                     false => ReadMany::Bytes(return_buf, start_pos),
                     true => ReadMany::EOF(start_pos),
@@ -523,6 +527,14 @@ impl<'a> Source<'a> {
                     }
                 }
             }
+        }
+    }
+
+    // TODO? Does this deserve to be public?
+    fn is_backtracked(&self) -> bool {
+        match self.idx {
+            ReadIdx::Backtracked(_) => true,
+            ReadIdx::MainBuf(_) => false,
         }
     }
 

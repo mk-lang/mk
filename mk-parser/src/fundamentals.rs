@@ -16,7 +16,13 @@ use crate::{
     DynParser, ParseResult, Parser,
 };
 
-use std::{marker::PhantomData, borrow::Borrow, ops::{BitOr, Add}};
+use std::{
+    borrow::Borrow,
+    marker::PhantomData,
+};
+
+#[cfg(feature = "bnf-syntax")]
+use std::ops::{Add, BitOr};
 
 ////////////////////////////////////////////////////////////
 
@@ -42,18 +48,18 @@ fn byte_name(b: u8) -> String {
 ///
 /// ```
 /// use mk_parser::{DynParser, ParseResult, source::Source, utils::Pos};
-/// use mk_parser::fundamentals::Null;
+/// use mk_parser::fundamentals::Succeed;
 ///
 /// let text = "foobar";
 /// let mut src = Source::new(text.as_bytes());
 ///
-/// let psr = Null;
+/// let psr = Succeed;
 /// assert_eq!(psr.parse(&mut src, false).unwrap(), ((), Pos::from((1, 1))));
 /// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Null;
+pub struct Succeed;
 
-impl DynParser for Null {
+impl DynParser for Succeed {
     type Output = ();
 
     fn parse(&self, src: &mut Source, _msg_hint: bool) -> ParseResult<()> {
@@ -61,25 +67,27 @@ impl DynParser for Null {
     }
 }
 
-impl Parser for Null {}
+impl Parser for Succeed {}
 
-impl<P: Parser<Output = ()>> BitOr<P> for Null {
+#[cfg(feature = "bnf-syntax")]
+impl<P: Parser<Output = ()>> BitOr<P> for Succeed {
     impl_bitor!(P);
 }
 
-impl<P: Parser<Output = ()>> Add<P> for Null {
+#[cfg(feature = "bnf-syntax")]
+impl<P: Parser<Output = ()>> Add<P> for Succeed {
     impl_add!(P);
 }
 
 /// Dummy parser that always fails
 ///
-/// In much the same way that [`Null`] always succeeds, this parser will always
-/// fail, producing a `ParseResult::Fail`, where the second and third positions
-/// in the tuple are given by `lvl` and `msg`.
+/// In much the same way that [`Succeed`] always succeeds, this parser will
+/// always fail, producing a `ParseResult::Fail`, where the second and third
+/// positions in the tuple are given by `lvl` and `msg`.
 ///
-/// In a similar fashion to `Null`, this parser doesn't have much of a use case
-/// outside of testing, but it's here because it is still a kind of fundamental
-/// parser in the mathematical sense.
+/// In a similar fashion to `Succeed`, this parser doesn't have much of a use
+/// case outside of testing, but it's here because it is still a kind of
+/// fundamental parser in the mathematical sense.
 ///
 /// # Examples
 ///
@@ -123,7 +131,7 @@ impl<P: Parser<Output = ()>> Add<P> for Null {
 /// information can be found in its doc comment. As well as a **forwards
 /// compatibility note**.
 ///
-/// [`Null`]: struct.Null.html
+/// [`Succeed`]: struct.Succeed.html
 /// [`fail`]: fn.fail.html
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fail<T> {
@@ -179,7 +187,9 @@ pub struct Fail<T> {
 ///
 /// [`Fail`]: struct.Fail.html
 /// [here]: struct.Fail.html#examples
-pub fn fail<T>() -> Fail<T> { Fail::default() }
+pub fn fail<T>() -> Fail<T> {
+    Fail::default()
+}
 
 impl<T> Default for Fail<T> {
     fn default() -> Self {
@@ -209,10 +219,12 @@ impl<T> DynParser for Fail<T> {
 
 impl<T> Parser for Fail<T> {}
 
+#[cfg(feature = "bnf-syntax")]
 impl<T, P: Parser<Output = T>> BitOr<P> for Fail<T> {
     impl_bitor!(P);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<T, P: Parser<Output = T>> Add<P> for Fail<T> {
     impl_add!(P);
 }
@@ -254,6 +266,7 @@ impl<F: Fn(u8) -> bool> DynParser for TakeWhile<F> {
 
 impl<F: Fn(u8) -> bool> Parser for TakeWhile<F> {}
 
+#[cfg(feature = "bnf-syntax")]
 impl<F, P> BitOr<P> for TakeWhile<F>
 where
     F: Fn(u8) -> bool,
@@ -262,6 +275,7 @@ where
     impl_bitor!(P);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<F, P> Add<P> for TakeWhile<F>
 where
     F: Fn(u8) -> bool,
@@ -339,10 +353,12 @@ impl DynParser for ByteLit {
 
 impl Parser for ByteLit {}
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = u8>> BitOr<P> for ByteLit {
     impl_bitor!(P);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = u8>> Add<P> for ByteLit {
     impl_add!(P);
 }
@@ -428,10 +444,12 @@ impl DynParser for ByteRange {
 
 impl Parser for ByteRange {}
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = u8>> BitOr<P> for ByteRange {
     impl_bitor!(P);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<P: Parser<Output = u8>> Add<P> for ByteRange {
     impl_add!(P);
 }
@@ -493,8 +511,7 @@ where
                         Some(LazyString::new(move || {
                             format!(
                                 "Expected byte sequence {:?}, found EOF",
-                                cloned.borrow().as_ref()
-                                    .iter().map(|b| format!("{}", b))
+                                cloned.borrow().as_ref().iter().map(|b| format!("{}", b))
                             )
                         })),
                     )
@@ -513,8 +530,7 @@ where
                         Some(LazyString::new(move || {
                             format!(
                                 "Expected byte sequence {:?}, found {:?}",
-                                cloned.borrow().as_ref()
-                                    .iter().map(|b| format!("{}", b)),
+                                cloned.borrow().as_ref().iter().map(|b| format!("{}", b)),
                                 seq.iter().map(|b| format!("{}", b))
                             )
                         })),
@@ -531,8 +547,10 @@ impl<S> Parser for ByteSeq<S>
 where
     S: AsRef<[u8]> + ToOwned,
     S::Owned: 'static,
-{}
+{
+}
 
+#[cfg(feature = "bnf-syntax")]
 impl<S, P> BitOr<P> for ByteSeq<S>
 where
     S: AsRef<[u8]> + ToOwned,
@@ -542,6 +560,7 @@ where
     impl_bitor!(P);
 }
 
+#[cfg(feature = "bnf-syntax")]
 impl<S, P> Add<P> for ByteSeq<S>
 where
     S: AsRef<[u8]> + ToOwned,
@@ -558,10 +577,10 @@ mod tests {
     use crate::DynParser;
 
     #[test]
-    fn null() {
+    fn success() {
         let s = "foobar";
         let mut src = Source::new(s.as_bytes());
-        let res = super::Null.parse(&mut src, false);
+        let res = super::Succeed.parse(&mut src, false);
         assert!(!res.is_error());
         assert!(!res.is_fail());
         assert_eq!(res.unwrap().1, Pos::from((1, 1)));
@@ -582,7 +601,7 @@ mod tests {
                 lvl,
                 msg: msg.clone(),
                 ign_hint,
-                .. Default::default()
+                ..Default::default()
             };
 
             let res = psr.parse(&mut src, msg_hint);
